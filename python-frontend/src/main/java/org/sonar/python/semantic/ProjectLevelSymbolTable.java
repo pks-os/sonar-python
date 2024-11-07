@@ -24,15 +24,14 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 import javax.annotation.CheckForNull;
 import javax.annotation.Nullable;
 import org.sonar.plugins.python.api.PythonFile;
-import org.sonar.plugins.python.api.symbols.AmbiguousSymbol;
 import org.sonar.plugins.python.api.symbols.Symbol;
-import org.sonar.plugins.python.api.symbols.Usage;
 import org.sonar.plugins.python.api.tree.BaseTreeVisitor;
 import org.sonar.plugins.python.api.tree.CallExpression;
 import org.sonar.plugins.python.api.tree.FileInput;
@@ -40,14 +39,23 @@ import org.sonar.plugins.python.api.tree.RegularArgument;
 import org.sonar.python.index.AmbiguousDescriptor;
 import org.sonar.python.index.Descriptor;
 import org.sonar.python.index.DescriptorUtils;
-import org.sonar.python.index.VariableDescriptor;
+import org.sonar.python.semantic.v2.BasicTypeTable;
+import org.sonar.python.semantic.v2.SymbolTableBuilderV2;
+import org.sonar.python.semantic.v2.TypeInferenceV2;
+import org.sonar.python.semantic.v2.UsageV2;
+import org.sonar.python.semantic.v2.converter.PythonTypeToDescriptorConverter;
 import org.sonar.python.semantic.v2.typeshed.TypeShedDescriptorsProvider;
+import org.sonar.python.types.v2.FunctionType;
+import org.sonar.python.types.v2.PythonType;
+import org.sonar.python.types.v2.TriBool;
+import org.sonar.python.types.v2.TypeChecker;
+import org.sonar.python.types.v2.UnknownType;
 
-import static org.sonar.python.tree.TreeUtils.getSymbolFromTree;
 import static org.sonar.python.tree.TreeUtils.nthArgumentOrKeyword;
 
 public class ProjectLevelSymbolTable {
 
+  private final PythonTypeToDescriptorConverter pythonTypeToDescriptorConverter = new PythonTypeToDescriptorConverter();
   private final Map<String, Set<Descriptor>> globalDescriptorsByModuleName;
   private Map<String, Descriptor> globalDescriptorsByFQN;
   private final Set<String> djangoViewsFQN = new HashSet<>();
@@ -86,34 +94,29 @@ public class ProjectLevelSymbolTable {
 
   public void addModule(FileInput fileInput, String packageName, PythonFile pythonFile) {
     SymbolTableBuilder symbolTableBuilder = new SymbolTableBuilder(packageName, pythonFile);
-    String fullyQualifiedModuleName = SymbolUtils.fullyQualifiedModuleName(packageName, pythonFile.fileName());
     fileInput.accept(symbolTableBuilder);
-    Set<Descriptor> globalDescriptors = new HashSet<>();
-    importsByModule.put(fullyQualifiedModuleName, symbolTableBuilder.importedModulesFQN());
-    for (Symbol globalVariable : fileInput.globalVariables()) {
-      String fullyQualifiedVariableName = globalVariable.fullyQualifiedName();
-      if (((fullyQualifiedVariableName != null) && !fullyQualifiedVariableName.startsWith(fullyQualifiedModuleName)) ||
-        globalVariable.usages().stream().anyMatch(u -> u.kind().equals(Usage.Kind.IMPORT))) {
-        // TODO: We don't put builtin or imported names in global symbol table to avoid duplicate FQNs in project level symbol table (to fix with SONARPY-647)
-        continue;
-      }
-      if (globalVariable.is(Symbol.Kind.CLASS, Symbol.Kind.FUNCTION)) {
-        globalDescriptors.add(DescriptorUtils.descriptor(globalVariable));
-      } else {
-        String fullyQualifiedName = fullyQualifiedModuleName + "." + globalVariable.name();
-        if (globalVariable.is(Symbol.Kind.AMBIGUOUS)) {
-          globalDescriptors.add(DescriptorUtils.ambiguousDescriptor((AmbiguousSymbol) globalVariable, fullyQualifiedName));
-        } else {
-          globalDescriptors.add(new VariableDescriptor(globalVariable.name(), fullyQualifiedName, globalVariable.annotatedTypeName()));
+
+    String fullyQualifiedModuleName = SymbolUtils.fullyQualifiedModuleName(packageName, pythonFile.fileName());
+    var symbolTable = new SymbolTableBuilderV2(fileInput).build();
+    var typeInferenceV2 = new TypeInferenceV2(new BasicTypeTable(), pythonFile, symbolTable, packageName);
+    var typesBySymbol = typeInferenceV2.inferTypes(fileInput);
+    importsByModule.put(fullyQualifiedModuleName, typeInferenceV2.importedModulesFQN());
+    var moduleDescriptors = typesBySymbol.entrySet()
+      .stream()
+      .filter(entry -> entry.getValue().stream().noneMatch(UnknownType.UnresolvedImportType.class::isInstance))
+      .map(entry -> {
+          var descriptor = pythonTypeToDescriptorConverter.convert(fullyQualifiedModuleName, entry.getKey(), entry.getValue());
+          return Map.entry(entry.getKey(), descriptor);
         }
-      }
-    }
-    globalDescriptorsByModuleName.put(fullyQualifiedModuleName, globalDescriptors);
-    if (globalDescriptorsByFQN != null) {
-      // TODO: build globalSymbolsByFQN incrementally
-      addModuleToGlobalSymbolsByFQN(globalDescriptors);
-    }
-    DjangoViewsVisitor djangoViewsVisitor = new DjangoViewsVisitor();
+      )
+      .filter(entry -> !(!Objects.requireNonNull(entry.getValue().fullyQualifiedName()).startsWith(fullyQualifiedModuleName)
+        || entry.getKey().usages().stream().anyMatch(u -> u.kind().equals(UsageV2.Kind.IMPORT))))
+      .map(Map.Entry::getValue)
+      .collect(Collectors.toSet());
+    globalDescriptorsByModuleName.put(fullyQualifiedModuleName, moduleDescriptors);
+    addModuleToGlobalSymbolsByFQN(moduleDescriptors);
+
+    DjangoViewsVisitor djangoViewsVisitor = new DjangoViewsVisitor(fullyQualifiedModuleName);
     fileInput.accept(djangoViewsVisitor);
   }
 
@@ -121,8 +124,7 @@ public class ProjectLevelSymbolTable {
     Map<String, Descriptor> moduleDescriptorsByFQN = descriptors.stream()
       .filter(d -> d.fullyQualifiedName() != null)
       .collect(Collectors.toMap(Descriptor::fullyQualifiedName, Function.identity(), AmbiguousDescriptor::create));
-    globalDescriptorsByFQN.putAll(moduleDescriptorsByFQN);
-
+    globalDescriptorsByFQN().putAll(moduleDescriptorsByFQN);
   }
 
   private Map<String, Descriptor> globalDescriptorsByFQN() {
@@ -202,20 +204,35 @@ public class ProjectLevelSymbolTable {
   }
 
   private class DjangoViewsVisitor extends BaseTreeVisitor {
+
+    String fullyQualifiedModuleName;
+
+    public DjangoViewsVisitor(String fullyQualifiedModuleName) {
+      this.fullyQualifiedModuleName = fullyQualifiedModuleName;
+    }
+
     @Override
     public void visitCallExpression(CallExpression callExpression) {
-      Symbol calleeSymbol = callExpression.calleeSymbol();
-      if (calleeSymbol == null) {
-        return;
-      }
-      if ("django.urls.conf.path".equals(calleeSymbol.fullyQualifiedName())) {
+      super.visitCallExpression(callExpression);
+      if (isCallRegisteringDjangoView(callExpression)) {
         RegularArgument viewArgument = nthArgumentOrKeyword(1, "view", callExpression.arguments());
         if (viewArgument != null) {
-          getSymbolFromTree(viewArgument.expression())
-            .filter(symbol -> symbol.fullyQualifiedName() != null)
-            .ifPresent(symbol -> djangoViewsFQN.add(symbol.fullyQualifiedName()));
+          PythonType pythonType = viewArgument.expression().typeV2();
+          if (pythonType instanceof UnknownType.UnresolvedImportType unresolvedImportType) {
+            String importPath = unresolvedImportType.importPath();
+            djangoViewsFQN.add(importPath);
+          } else if (pythonType instanceof FunctionType functionType) {
+            djangoViewsFQN.add(functionType.fullyQualifiedName());
+          }
         }
       }
+    }
+
+    private static boolean isCallRegisteringDjangoView(CallExpression callExpression) {
+      TypeChecker typeChecker = new TypeChecker(new BasicTypeTable());
+      TriBool isConfPathCall = typeChecker.typeCheckBuilder().isTypeWithName("django.urls.conf.path").check(callExpression.callee().typeV2());
+      TriBool isPathCall = typeChecker.typeCheckBuilder().isTypeWithName("django.urls.path").check(callExpression.callee().typeV2());
+      return isConfPathCall.equals(TriBool.TRUE) || isPathCall.equals(TriBool.TRUE);
     }
   }
 }

@@ -55,9 +55,6 @@ public class FunctionDescriptorToPythonTypeConverter implements DescriptorToPyth
 
     var decorators = from.decorators()
       .stream()
-      .map(decoratorName -> Stream.of(ctx.moduleFqn(), decoratorName)
-        .filter(Predicate.not(String::isEmpty))
-        .collect(Collectors.joining(".")))
       .map(ctx.lazyTypesContext()::getOrCreateLazyType)
       .map(TypeWrapper::of)
       .toList();
@@ -69,6 +66,7 @@ public class FunctionDescriptorToPythonTypeConverter implements DescriptorToPyth
     var toBuilder = new FunctionTypeBuilder()
       .withOwner(ctx.currentParent())
       .withName(from.name())
+      .withFullyQualifiedName(from.fullyQualifiedName())
       .withParameters(parameters)
       .withDecorators(decorators)
       .withReturnType(returnType)

@@ -24,8 +24,10 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Deque;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.stream.Stream;
 import javax.annotation.Nullable;
 import org.sonar.plugins.python.api.PythonFile;
@@ -98,20 +100,28 @@ public class TrivialTypeInferenceVisitor extends BaseTreeVisitor {
   private final TypeTable projectLevelTypeTable;
   private final String fileId;
   private final String fullyQualifiedModuleName;
+  private final String moduleName;
 
-  private final Deque<PythonType> typeStack = new ArrayDeque<>();
+  private final Deque<Scope> typeStack = new ArrayDeque<>();
+  private final Set<String> importedModulesFQN = new HashSet<>();
+
+  private record Scope(PythonType type, String scopeFullyQualifiedName) {}
 
   public TrivialTypeInferenceVisitor(TypeTable projectLevelTypeTable, PythonFile pythonFile, String fullyQualifiedModuleName) {
     this.projectLevelTypeTable = projectLevelTypeTable;
     Path path = pathOf(pythonFile);
+    this.moduleName = pythonFile.fileName();
     this.fileId = path != null ? path.toString() : pythonFile.toString();
     this.fullyQualifiedModuleName = fullyQualifiedModuleName;
   }
 
+  public Set<String> importedModulesFQN() {
+    return importedModulesFQN;
+  }
 
   @Override
   public void visitFileInput(FileInput fileInput) {
-    var type = new ModuleType("somehow get its name");
+    var type = new ModuleType(moduleName);
     inTypeScope(type, () -> super.visitFileInput(fileInput));
   }
 
@@ -321,8 +331,9 @@ public class TrivialTypeInferenceVisitor extends BaseTreeVisitor {
   }
 
   private FunctionType buildFunctionType(FunctionDef functionDef) {
+    String fullyQualifiedName = currentScopeFullyQualifiedName() + "." + functionDef.name().name();
     FunctionTypeBuilder functionTypeBuilder = new FunctionTypeBuilder()
-      .fromFunctionDef(functionDef, fileId, projectLevelTypeTable)
+      .fromFunctionDef(functionDef, fullyQualifiedName, fileId, projectLevelTypeTable)
       .withDefinitionLocation(locationInFile(functionDef.name(), fileId));
     ClassType owner = null;
     if (currentType() instanceof ClassType classType) {
@@ -356,7 +367,7 @@ public class TrivialTypeInferenceVisitor extends BaseTreeVisitor {
         var dottedName = aliasedName.dottedName();
         var fqn = dottedNameToPartFqn(dottedName);
         var resolvedType = projectLevelTypeTable.getModuleType(fqn);
-
+        importedModulesFQN.add(String.join(".", fqn));
         if (aliasedName.alias() != null) {
           generateNamesForImportAlias(aliasedName, resolvedType, fqn);
         } else {
@@ -398,6 +409,7 @@ public class TrivialTypeInferenceVisitor extends BaseTreeVisitor {
       int sizeLimit = Math.max(0, moduleFqnElements.size() - dotPrefixTokens.size());
       fromModuleFqn = Stream.concat(moduleFqnElements.stream().limit(sizeLimit), fromModuleFqn.stream()).toList();
     }
+    importedModulesFQN.add(String.join(".", fromModuleFqn));
     setTypeToImportFromStatement(importFrom, fromModuleFqn);
   }
 
@@ -473,7 +485,7 @@ public class TrivialTypeInferenceVisitor extends BaseTreeVisitor {
   }
 
   private static PythonType resolveTypeAnnotationExpressionType(Expression expression) {
-    if (expression instanceof Name name && !(name.typeV2() instanceof UnknownType)) {
+    if (expression instanceof Name name && name.typeV2() != PythonType.UNKNOWN) {
       return new ObjectType(name.typeV2(), TypeSource.TYPE_HINT);
     } else if (expression instanceof SubscriptionExpression subscriptionExpression && !(subscriptionExpression.object().typeV2() instanceof UnknownType)) {
       var candidateTypes = subscriptionExpression.subscripts()
@@ -555,11 +567,19 @@ public class TrivialTypeInferenceVisitor extends BaseTreeVisitor {
   }
 
   private PythonType currentType() {
-    return typeStack.peek();
+    return typeStack.peek().type();
+  }
+
+  private String currentScopeFullyQualifiedName() {
+    return typeStack.peek().scopeFullyQualifiedName();
   }
 
   private void inTypeScope(PythonType pythonType, Runnable runnable) {
-    this.typeStack.push(pythonType);
+    String newScopeFullyQualifiedName = Optional.ofNullable(typeStack.peek())
+      .map(Scope::scopeFullyQualifiedName)
+      .map(s -> s + "." + pythonType.name())
+      .orElse(fullyQualifiedModuleName);
+    this.typeStack.push(new Scope(pythonType, newScopeFullyQualifiedName));
     runnable.run();
     this.typeStack.poll();
   }
