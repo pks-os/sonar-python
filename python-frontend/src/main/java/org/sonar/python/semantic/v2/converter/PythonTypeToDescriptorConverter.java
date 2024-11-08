@@ -57,9 +57,10 @@ public class PythonTypeToDescriptorConverter {
 
     if (candidates.size() == 1) {
       return candidates.iterator().next();
+    } else if (candidates.size() > 1) {
+      return new AmbiguousDescriptor(symbol.name(), symbolFqn(moduleFqn, symbol.name()), candidates);
     }
-
-    return new AmbiguousDescriptor(symbol.name(), symbolFqn(moduleFqn, symbol.name()), candidates);
+    throw new IllegalStateException("No candidate found for descriptor " + symbol.name());
   }
 
   private static Descriptor convert(String moduleFqn, String parentFqn, String symbolName, PythonType type, List<UsageV2> symbolUsages) {
@@ -120,9 +121,8 @@ public class PythonTypeToDescriptorConverter {
     var hasSuperClassWithoutDescriptor = false;
     var superClasses = new ArrayList<String>();
     for (var superClassWrapper : type.superClasses()) {
-      var superClass = superClassWrapper.type();
-      if (superClass != PythonType.UNKNOWN) {
-        var superClassFqn = typeFqn(moduleFqn, superClass);
+      var superClassFqn = typeFqn(moduleFqn, superClassWrapper.type());
+      if (superClassFqn != null) {
         superClasses.add(superClassFqn);
       } else {
         hasSuperClassWithoutDescriptor = true;
