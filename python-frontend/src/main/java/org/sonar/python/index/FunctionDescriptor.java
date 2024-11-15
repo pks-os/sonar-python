@@ -22,7 +22,6 @@ package org.sonar.python.index;
 import java.util.ArrayList;
 import java.util.List;
 import javax.annotation.CheckForNull;
-import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 import org.sonar.plugins.python.api.LocationInFile;
 
@@ -43,12 +42,12 @@ public class FunctionDescriptor implements Descriptor {
   private final TypeAnnotationDescriptor typeAnnotationDescriptor;
 
 
-  public FunctionDescriptor(String name, String fullyQualifiedName, List<Parameter> parameters, boolean isAsynchronous,
+  public FunctionDescriptor(String name, @Nullable String fullyQualifiedName, List<Parameter> parameters, boolean isAsynchronous,
     boolean isInstanceMethod, List<String> decorators, boolean hasDecorators, @Nullable LocationInFile definitionLocation, @Nullable String annotatedReturnTypeName) {
     this(name, fullyQualifiedName, parameters, isAsynchronous, isInstanceMethod, decorators, hasDecorators, definitionLocation, annotatedReturnTypeName, null);
   }
 
-  public FunctionDescriptor(String name, String fullyQualifiedName, List<Parameter> parameters, boolean isAsynchronous,
+  public FunctionDescriptor(String name, @Nullable String fullyQualifiedName, List<Parameter> parameters, boolean isAsynchronous,
     boolean isInstanceMethod, List<String> decorators, boolean hasDecorators, @Nullable LocationInFile definitionLocation,
     @Nullable String annotatedReturnTypeName, @Nullable TypeAnnotationDescriptor typeAnnotationDescriptor) {
 
@@ -70,7 +69,6 @@ public class FunctionDescriptor implements Descriptor {
   }
 
   @Override
-  @Nonnull
   public String fullyQualifiedName() {
     return fullyQualifiedName;
   }
