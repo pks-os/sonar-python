@@ -28,7 +28,6 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.function.Function;
 import java.util.stream.Stream;
-import org.assertj.core.api.Assertions;
 import org.assertj.core.api.InstanceOfAssertFactories;
 import org.assertj.core.groups.Tuple;
 import org.junit.jupiter.api.Disabled;
@@ -64,6 +63,7 @@ import org.sonar.python.semantic.ProjectLevelSymbolTable;
 import org.sonar.python.semantic.SymbolUtils;
 import org.sonar.python.tree.ExpressionStatementImpl;
 import org.sonar.python.tree.TreeUtils;
+import org.sonar.python.tree.TupleImpl;
 import org.sonar.python.types.v2.ClassType;
 import org.sonar.python.types.v2.FunctionType;
 import org.sonar.python.types.v2.LazyType;
@@ -99,7 +99,7 @@ import static org.sonar.python.types.v2.TypesTestUtils.TYPE_TYPE;
 
 public class TypeInferenceV2Test {
 
-  static PythonFile pythonFile = PythonTestUtils.pythonFile("mod");
+  static PythonFile pythonFile = pythonFile("mod");
 
   @Test
   void testTypeshedImports() {
@@ -139,6 +139,178 @@ public class TypeInferenceV2Test {
       .isInstanceOf(ModuleType.class)
       .extracting(PythonType::name)
       .isEqualTo("datetime");
+  }
+
+  @Test
+  void builtinGenericType() {
+    Expression expression = lastExpression(
+      """
+        x = list[str]()
+        x
+        """
+    );
+    assertThat(expression.typeV2().unwrappedType()).isEqualTo(LIST_TYPE);
+  }
+
+  @Test
+  void userDefinedGenericType() {
+    FileInput fileInput = inferTypes(
+      """
+        from typing import Generic, TypeVar
+        T = TypeVar('T')
+        class MyClass(Generic[T]): ...
+        x = MyClass[str]()
+        x
+        """
+    );
+    PythonType classType = ((ClassDef) fileInput.statements().statements().get(2)).name().typeV2();
+    ObjectType xType = (ObjectType) ((ExpressionStatement) fileInput.statements().statements().get(4)).expressions().get(0).typeV2();
+    assertThat(xType.unwrappedType()).isEqualTo(classType);
+    // SONARPY-2356: Instantiation of specialized classes
+    assertThat(xType.attributes()).isEmpty();
+  }
+
+  @Test
+  void inheritedGenericType() {
+    FileInput fileInput = inferTypes(
+      """
+        from typing import Generic, TypeVar
+        T = TypeVar('T')
+        class MyClass(Generic[T]): ...
+        class MyOtherClass(MyClass[T]): ...
+        x = MyOtherClass[str]()
+        x
+        """
+    );
+    ClassType myOtherClassType = (ClassType) ((ClassDef) fileInput.statements().statements().get(3)).name().typeV2();
+    assertThat(myOtherClassType.isGeneric()).isTrue();
+    PythonType xType = ((ExpressionStatement) fileInput.statements().statements().get(5)).expressions().get(0).typeV2();
+    assertThat(xType.unwrappedType()).isEqualTo(myOtherClassType);
+  }
+
+  @Test
+  void inheritedGenericTypeUnsupportedExpression() {
+    FileInput fileInput = inferTypes(
+      """
+        from typing import Generic, TypeVar
+        T = TypeVar('T')
+        class MyClass(Generic[T()]): ...
+        class MyOtherClass(MyClass[T]): ...
+        x = MyOtherClass[str]()
+        x
+        """
+    );
+    ClassType myOtherClassType = (ClassType) ((ClassDef) fileInput.statements().statements().get(3)).name().typeV2();
+    assertThat(myOtherClassType.isGeneric()).isFalse();
+    PythonType xType = ((ExpressionStatement) fileInput.statements().statements().get(5)).expressions().get(0).typeV2();
+    assertThat(xType.unwrappedType()).isInstanceOf(UnknownType.class);
+  }
+
+  @Test
+  void inheritedGenericTypeVarAnnotatedAssignment() {
+    FileInput fileInput = inferTypes(
+      """
+        from typing import Generic, TypeVar
+        T: TypeVar = TypeVar('T')
+        class MyClass(Generic[T]): ...
+        class MyOtherClass(MyClass[T]): ...
+        x = MyOtherClass[str]()
+        x
+        """
+    );
+    ClassType myOtherClassType = (ClassType) ((ClassDef) fileInput.statements().statements().get(3)).name().typeV2();
+    assertThat(myOtherClassType.isGeneric()).isTrue();
+    PythonType xType = ((ExpressionStatement) fileInput.statements().statements().get(5)).expressions().get(0).typeV2();
+    assertThat(xType.unwrappedType()).isEqualTo(myOtherClassType);
+  }
+
+  @Test
+  void inheritedGenericTypeVarAssignmentExpression() {
+    FileInput fileInput = inferTypes(
+      """
+        from typing import Generic, TypeVar
+        foo(T:=TypeVar('T'))
+        class MyClass(Generic[T]): ...
+        class MyOtherClass(MyClass[T]): ...
+        x = MyOtherClass[str]()
+        x
+        """
+    );
+    ClassType myOtherClassType = (ClassType) ((ClassDef) fileInput.statements().statements().get(3)).name().typeV2();
+    assertThat(myOtherClassType.isGeneric()).isTrue();
+    PythonType xType = ((ExpressionStatement) fileInput.statements().statements().get(5)).expressions().get(0).typeV2();
+    assertThat(xType.unwrappedType()).isEqualTo(myOtherClassType);
+  }
+
+  @Test
+  void inheritedGenericTypeUndefinedTypeVar() {
+    FileInput fileInput = inferTypes(
+      """
+        from typing import Generic
+        class MyClass(Generic[T]): ...
+        class MyOtherClass(MyClass[T]): ...
+        x = MyOtherClass[str]()
+        x
+        """
+    );
+    ClassType myOtherClassType = (ClassType) ((ClassDef) fileInput.statements().statements().get(2)).name().typeV2();
+    // TypeVar is undefined: not a proper generic
+    assertThat(myOtherClassType.isGeneric()).isFalse();
+    PythonType xType = ((ExpressionStatement) fileInput.statements().statements().get(4)).expressions().get(0).typeV2();
+    assertThat(xType.unwrappedType()).isInstanceOf(UnknownType.class);
+  }
+
+  @Test
+  void inheritedGenericTypeNoSubscription() {
+    FileInput fileInput = inferTypes(
+      """
+        from typing import Generic
+        class MyClass(Generic[T]): ...
+        class MyOtherClass(MyClass): ...
+        # Note: this actually throws a TypeError
+        x = MyOtherClass[str]()
+        x
+        """
+    );
+    ClassType myOtherClassType = (ClassType) ((ClassDef) fileInput.statements().statements().get(2)).name().typeV2();
+    // MyOtherClass can no longer be considered generic (non-generic subclass)
+    assertThat(myOtherClassType.isGeneric()).isFalse();
+    PythonType xType = ((ExpressionStatement) fileInput.statements().statements().get(4)).expressions().get(0).typeV2();
+    assertThat(xType.unwrappedType()).isInstanceOf(UnknownType.UnknownTypeImpl.class);
+  }
+
+  @Test
+  void inheritedGenericTypeConcreteType() {
+    FileInput fileInput = inferTypes(
+      """
+        from typing import Generic
+        class MyClass(Generic[T]): ...
+        class MyOtherClass(MyClass[str]): ...
+        # Note: this instantiation actually throws a TypeError
+        x = MyOtherClass[str]()
+        x
+        """
+    );
+    ClassType myOtherClassType = (ClassType) ((ClassDef) fileInput.statements().statements().get(2)).name().typeV2();
+    // SONARPY-2356: MyOtherClass can no longer be considered generic (specialized version of MyClass)
+    assertThat(myOtherClassType.isGeneric()).isFalse();
+    PythonType xType = ((ExpressionStatement) fileInput.statements().statements().get(4)).expressions().get(0).typeV2();
+    assertThat(xType.unwrappedType()).isInstanceOf(UnknownType.class);
+  }
+
+  @Test
+  void basicGenericTypeParameter() {
+    FileInput fileInput = inferTypes(
+      """
+        class MyClass[T](): ...
+        x = MyClass[str]()
+        x
+        """
+    );
+    ClassType myOtherClassType = (ClassType) ((ClassDef) fileInput.statements().statements().get(0)).name().typeV2();
+    assertThat(myOtherClassType.isGeneric()).isTrue();
+    PythonType xType = ((ExpressionStatement) fileInput.statements().statements().get(2)).expressions().get(0).typeV2();
+    assertThat(xType.unwrappedType()).isEqualTo(myOtherClassType);
   }
 
   @Test
@@ -289,7 +461,7 @@ public class TypeInferenceV2Test {
     var importFrom = (ImportFrom) root.statements().statements().get(0);
     var type = importFrom.importedNames().get(0).dottedName().names().get(0).typeV2();
 
-    Assertions.assertThat(type)
+    assertThat(type)
       .isInstanceOf(ClassType.class)
       .extracting(PythonType::name)
       .isEqualTo("date");
@@ -305,10 +477,10 @@ public class TypeInferenceV2Test {
     var type1 = importFrom.importedNames().get(0).dottedName().names().get(0).typeV2();
     var type2 = importFrom.importedNames().get(0).alias().typeV2();
 
-    Assertions.assertThat(type1)
+    assertThat(type1)
       .isEqualTo(PythonType.UNKNOWN);
 
-    Assertions.assertThat(type2)
+    assertThat(type2)
       .isInstanceOf(ClassType.class)
       .extracting(PythonType::name)
       .isEqualTo("date");
@@ -685,8 +857,8 @@ public class TypeInferenceV2Test {
       """);
 
     var functionDef = (FunctionDef) root.statements().statements().get(1);
-    var lastExpressionStatement = (ExpressionStatement) functionDef.body().statements().get(functionDef.body().statements().size() -1);
-    Assertions.assertThat(lastExpressionStatement.expressions().get(0).typeV2().unwrappedType()).isEqualTo(PythonType.UNKNOWN);
+    var lastExpressionStatement = (ExpressionStatement) functionDef.body().statements().get(functionDef.body().statements().size() - 1);
+    assertThat(lastExpressionStatement.expressions().get(0).typeV2().unwrappedType()).isEqualTo(PythonType.UNKNOWN);
   }
 
   @Test
@@ -699,8 +871,8 @@ public class TypeInferenceV2Test {
       """);
 
     var functionDef = (FunctionDef) root.statements().statements().get(1);
-    var lastExpressionStatement = (ExpressionStatement) functionDef.body().statements().get(functionDef.body().statements().size() -1);
-    Assertions.assertThat(lastExpressionStatement.expressions().get(0).typeV2().unwrappedType()).isEqualTo(PythonType.UNKNOWN);
+    var lastExpressionStatement = (ExpressionStatement) functionDef.body().statements().get(functionDef.body().statements().size() - 1);
+    assertThat(lastExpressionStatement.expressions().get(0).typeV2().unwrappedType()).isEqualTo(PythonType.UNKNOWN);
   }
 
   @Test
@@ -714,8 +886,8 @@ public class TypeInferenceV2Test {
       """);
 
     var functionDef = (FunctionDef) root.statements().statements().get(1);
-    var lastExpressionStatement = (ExpressionStatement) functionDef.body().statements().get(functionDef.body().statements().size() -1);
-    Assertions.assertThat(lastExpressionStatement.expressions().get(0).typeV2().unwrappedType()).isEqualTo(INT_TYPE);
+    var lastExpressionStatement = (ExpressionStatement) functionDef.body().statements().get(functionDef.body().statements().size() - 1);
+    assertThat(lastExpressionStatement.expressions().get(0).typeV2().unwrappedType()).isEqualTo(INT_TYPE);
   }
 
   @Test
@@ -726,8 +898,8 @@ public class TypeInferenceV2Test {
       x
       """);
 
-    var lastExpressionStatement = (ExpressionStatement) root.statements().statements().get(root.statements().statements().size() -1);
-    Assertions.assertThat(lastExpressionStatement.expressions().get(0).typeV2().unwrappedType()).isEqualTo(PythonType.UNKNOWN);
+    var lastExpressionStatement = (ExpressionStatement) root.statements().statements().get(root.statements().statements().size() - 1);
+    assertThat(lastExpressionStatement.expressions().get(0).typeV2().unwrappedType()).isEqualTo(PythonType.UNKNOWN);
   }
 
   @Test
@@ -802,7 +974,8 @@ public class TypeInferenceV2Test {
 
     CallExpression callExpressionSpy = Mockito.spy(callExpression);
     Expression calleeSpy = Mockito.spy(callExpression.callee());
-    FunctionType functionType = new FunctionType("foo", "my_package.foo", List.of(), List.of(), List.of(), new SimpleTypeWrapper(new ObjectType(INT_TYPE)), TypeOrigin.STUB, false, false, false, false, null, null);
+    FunctionType functionType = new FunctionType("foo", "my_package.foo", List.of(), List.of(), List.of(), new SimpleTypeWrapper(new ObjectType(INT_TYPE)), TypeOrigin.STUB,
+      false, false, false, false, null, null);
     Mockito.when(calleeSpy.typeV2()).thenReturn(functionType);
     Mockito.when(callExpressionSpy.callee()).thenReturn(calleeSpy);
 
@@ -821,8 +994,8 @@ public class TypeInferenceV2Test {
       """);
 
     var functionDef = (FunctionDef) root.statements().statements().get(0);
-    var lastExpressionStatement = (ExpressionStatement) functionDef.body().statements().get(functionDef.body().statements().size() -1);
-    Assertions.assertThat(lastExpressionStatement.expressions().get(0).typeV2().unwrappedType()).isEqualTo(STR_TYPE);
+    var lastExpressionStatement = (ExpressionStatement) functionDef.body().statements().get(functionDef.body().statements().size() - 1);
+    assertThat(lastExpressionStatement.expressions().get(0).typeV2().unwrappedType()).isEqualTo(STR_TYPE);
   }
 
   @Test
@@ -834,8 +1007,8 @@ public class TypeInferenceV2Test {
       """);
 
     var functionDef = (FunctionDef) root.statements().statements().get(0);
-    var lastExpressionStatement = (ExpressionStatement) functionDef.body().statements().get(functionDef.body().statements().size() -1);
-    Assertions.assertThat(lastExpressionStatement.expressions().get(0).typeV2().unwrappedType()).isEqualTo(STR_TYPE);
+    var lastExpressionStatement = (ExpressionStatement) functionDef.body().statements().get(functionDef.body().statements().size() - 1);
+    assertThat(lastExpressionStatement.expressions().get(0).typeV2().unwrappedType()).isEqualTo(STR_TYPE);
   }
 
   @Test
@@ -847,9 +1020,9 @@ public class TypeInferenceV2Test {
       """);
 
     var functionDef = (FunctionDef) root.statements().statements().get(0);
-    var lastExpressionStatement = (ExpressionStatement) functionDef.body().statements().get(functionDef.body().statements().size() -1);
-    Assertions.assertThat(lastExpressionStatement.expressions().get(0).typeV2().unwrappedType()).isEqualTo(INT_TYPE);
-    Assertions.assertThat(lastExpressionStatement.expressions().get(0).typeV2().typeSource()).isEqualTo(TypeSource.TYPE_HINT);
+    var lastExpressionStatement = (ExpressionStatement) functionDef.body().statements().get(functionDef.body().statements().size() - 1);
+    assertThat(lastExpressionStatement.expressions().get(0).typeV2().unwrappedType()).isEqualTo(INT_TYPE);
+    assertThat(lastExpressionStatement.expressions().get(0).typeV2().typeSource()).isEqualTo(TypeSource.TYPE_HINT);
   }
 
   @Test
@@ -860,11 +1033,11 @@ public class TypeInferenceV2Test {
       """);
 
     var functionDef = (FunctionDef) root.statements().statements().get(0);
-    var lastExpressionStatement = (ExpressionStatement) functionDef.body().statements().get(functionDef.body().statements().size() -1);
+    var lastExpressionStatement = (ExpressionStatement) functionDef.body().statements().get(functionDef.body().statements().size() - 1);
     var type = (ObjectType) lastExpressionStatement.expressions().get(0).typeV2();
-    Assertions.assertThat(type.unwrappedType()).isEqualTo(LIST_TYPE);
-    Assertions.assertThat(type.typeSource()).isEqualTo(TypeSource.TYPE_HINT);
-    Assertions.assertThat(type.attributes())
+    assertThat(type.unwrappedType()).isEqualTo(LIST_TYPE);
+    assertThat(type.typeSource()).isEqualTo(TypeSource.TYPE_HINT);
+    assertThat(type.attributes())
       .extracting(PythonType::unwrappedType)
       .containsOnly(INT_TYPE);
   }
@@ -877,8 +1050,8 @@ public class TypeInferenceV2Test {
       """);
 
     var functionDef = (FunctionDef) root.statements().statements().get(0);
-    var lastExpressionStatement = (ExpressionStatement) functionDef.body().statements().get(functionDef.body().statements().size() -1);
-    Assertions.assertThat(lastExpressionStatement.expressions().get(0).typeV2().unwrappedType()).isEqualTo(PythonType.UNKNOWN);
+    var lastExpressionStatement = (ExpressionStatement) functionDef.body().statements().get(functionDef.body().statements().size() - 1);
+    assertThat(lastExpressionStatement.expressions().get(0).typeV2().unwrappedType()).isEqualTo(PythonType.UNKNOWN);
   }
 
   @Test
@@ -889,8 +1062,8 @@ public class TypeInferenceV2Test {
       """);
 
     var functionDef = (FunctionDef) root.statements().statements().get(0);
-    var lastExpressionStatement = (ExpressionStatement) functionDef.body().statements().get(functionDef.body().statements().size() -1);
-    Assertions.assertThat(lastExpressionStatement.expressions().get(0).typeV2().unwrappedType()).isEqualTo(PythonType.UNKNOWN);
+    var lastExpressionStatement = (ExpressionStatement) functionDef.body().statements().get(functionDef.body().statements().size() - 1);
+    assertThat(lastExpressionStatement.expressions().get(0).typeV2().unwrappedType()).isEqualTo(PythonType.UNKNOWN);
   }
 
   @Test
@@ -902,8 +1075,8 @@ public class TypeInferenceV2Test {
       """);
 
     var functionDef = (FunctionDef) root.statements().statements().get(1);
-    var lastExpressionStatement = (ExpressionStatement) functionDef.body().statements().get(functionDef.body().statements().size() -1);
-    Assertions.assertThat(lastExpressionStatement.expressions().get(0).typeV2().unwrappedType()).isEqualTo(PythonType.UNKNOWN);
+    var lastExpressionStatement = (ExpressionStatement) functionDef.body().statements().get(functionDef.body().statements().size() - 1);
+    assertThat(lastExpressionStatement.expressions().get(0).typeV2().unwrappedType()).isEqualTo(PythonType.UNKNOWN);
   }
 
   @Test
@@ -914,10 +1087,10 @@ public class TypeInferenceV2Test {
       """);
 
     var functionDef = (FunctionDef) root.statements().statements().get(0);
-    var lastExpressionStatement = (ExpressionStatement) functionDef.body().statements().get(functionDef.body().statements().size() -1);
+    var lastExpressionStatement = (ExpressionStatement) functionDef.body().statements().get(functionDef.body().statements().size() - 1);
     var type = (UnionType) lastExpressionStatement.expressions().get(0).typeV2();
 
-    Assertions.assertThat(type.candidates())
+    assertThat(type.candidates())
       .extracting(PythonType::unwrappedType)
       .containsOnly(INT_TYPE, STR_TYPE);
   }
@@ -937,8 +1110,8 @@ public class TypeInferenceV2Test {
     var lastExpressionStatement = (ExpressionStatement) functionDef.body().statements().get(2);
     var lastType = lastExpressionStatement.expressions().get(0).typeV2();
 
-    Assertions.assertThat(firstType.unwrappedType()).isEqualTo(INT_TYPE);
-    Assertions.assertThat(lastType.unwrappedType()).isEqualTo(STR_TYPE);
+    assertThat(firstType.unwrappedType()).isEqualTo(INT_TYPE);
+    assertThat(lastType.unwrappedType()).isEqualTo(STR_TYPE);
   }
 
   @Test
@@ -952,7 +1125,7 @@ public class TypeInferenceV2Test {
     var lastExpressionStatement = (ExpressionStatement) functionDef.body().statements().get(0);
     var lastType = lastExpressionStatement.expressions().get(0).typeV2();
 
-    Assertions.assertThat(lastType.unwrappedType()).isEqualTo(INT_TYPE);
+    assertThat(lastType.unwrappedType()).isEqualTo(INT_TYPE);
   }
 
   @Test
@@ -1152,19 +1325,19 @@ public class TypeInferenceV2Test {
   @Test
   void global_variable() {
     assertThat(lastExpression("""
-        global a
-        a = 42
-        a
-        """).typeV2().unwrappedType()).isEqualTo(PythonType.UNKNOWN);
+      global a
+      a = 42
+      a
+      """).typeV2().unwrappedType()).isEqualTo(PythonType.UNKNOWN);
   }
 
   @Test
   void global_variable_builtin() {
     assertThat(lastExpression("""
-        global list
-        list = 42
-        list
-        """).typeV2().unwrappedType()).isEqualTo(PythonType.UNKNOWN);
+      global list
+      list = 42
+      list
+      """).typeV2().unwrappedType()).isEqualTo(PythonType.UNKNOWN);
   }
 
   @Test
@@ -1191,9 +1364,10 @@ public class TypeInferenceV2Test {
         x
       """);
     var functionDef = (FunctionDef) fileInput.statements().statements().get(0);
-    var lastExpressionStatement = (ExpressionStatement) functionDef.body().statements().get(functionDef.body().statements().size() -1);
+    var lastExpressionStatement = (ExpressionStatement) functionDef.body().statements().get(functionDef.body().statements().size() - 1);
     assertThat(lastExpressionStatement.expressions().get(0).typeV2()).isInstanceOf(UnionType.class);
-    assertThat(((UnionType) lastExpressionStatement.expressions().get(0).typeV2()).candidates()).extracting(PythonType::unwrappedType).containsExactlyInAnyOrder(INT_TYPE, STR_TYPE);
+    assertThat(((UnionType) lastExpressionStatement.expressions().get(0).typeV2()).candidates()).extracting(PythonType::unwrappedType).containsExactlyInAnyOrder(INT_TYPE,
+      STR_TYPE);
   }
 
   @Test
@@ -1211,13 +1385,13 @@ public class TypeInferenceV2Test {
       .map(Name.class::cast)
       .get();
 
-    Assertions.assertThat(aName)
+    assertThat(aName)
       .isNotNull()
       .extracting(Name::symbolV2)
       .isNotNull();
 
     var aSymbol = aName.symbolV2();
-    Assertions.assertThat(aSymbol.usages()).hasSize(6);
+    assertThat(aSymbol.usages()).hasSize(6);
 
     var types = aSymbol.usages()
       .stream()
@@ -1228,7 +1402,7 @@ public class TypeInferenceV2Test {
       .map(PythonType::unwrappedType)
       .toList();
 
-    Assertions.assertThat(types).hasSize(6)
+    assertThat(types).hasSize(6)
       .containsExactly(INT_TYPE, INT_TYPE, STR_TYPE, STR_TYPE, STR_TYPE, STR_TYPE);
   }
 
@@ -1245,13 +1419,13 @@ public class TypeInferenceV2Test {
       .map(Name.class::cast)
       .get();
 
-    Assertions.assertThat(aName)
+    assertThat(aName)
       .isNotNull()
       .extracting(Name::symbolV2)
       .isNotNull();
 
     var aSymbol = aName.symbolV2();
-    Assertions.assertThat(aSymbol.usages()).hasSize(3);
+    assertThat(aSymbol.usages()).hasSize(3);
 
     var types = aSymbol.usages()
       .stream()
@@ -1261,25 +1435,25 @@ public class TypeInferenceV2Test {
       .map(Expression::typeV2)
       .toList();
 
-    Assertions.assertThat(types).hasSize(3);
+    assertThat(types).hasSize(3);
 
-    Assertions.assertThat(types.get(0)).isInstanceOf(ObjectType.class)
+    assertThat(types.get(0)).isInstanceOf(ObjectType.class)
       .extracting(ObjectType.class::cast)
       .extracting(ObjectType::type)
       .isInstanceOf(ClassType.class)
       .extracting(PythonType::name)
       .isEqualTo("int");
 
-    Assertions.assertThat(types.get(1)).isInstanceOf(ObjectType.class)
+    assertThat(types.get(1)).isInstanceOf(ObjectType.class)
       .extracting(ObjectType.class::cast)
       .extracting(ObjectType::type)
       .isInstanceOf(ClassType.class)
       .extracting(PythonType::name)
       .isEqualTo("str");
 
-    Assertions.assertThat(types.get(2)).isInstanceOf(UnionType.class);
+    assertThat(types.get(2)).isInstanceOf(UnionType.class);
     var type3 = (UnionType) types.get(2);
-    Assertions.assertThat(type3.candidates())
+    assertThat(type3.candidates())
       .hasSize(2)
       .extracting(ObjectType.class::cast)
       .extracting(ObjectType::type)
@@ -1293,9 +1467,9 @@ public class TypeInferenceV2Test {
   void unpacking_assignment() {
     assertThat(lastExpression(
       """
-      x, = 42,
-      x
-      """
+        x, = 42,
+        x
+        """
     ).typeV2()).isEqualTo(PythonType.UNKNOWN);
   }
 
@@ -1303,9 +1477,9 @@ public class TypeInferenceV2Test {
   void unpacking_assignment_2() {
     assertThat(lastExpression(
       """
-      x, y = 42, 43
-      x
-      """
+        x, y = 42, 43
+        x
+        """
     ).typeV2()).isEqualTo(PythonType.UNKNOWN);
   }
 
@@ -1313,9 +1487,9 @@ public class TypeInferenceV2Test {
   void multiple_lhs_expressions() {
     assertThat(lastExpression(
       """
-      x = y = 42
-      x
-      """
+        x = y = 42
+        x
+        """
     ).typeV2()).isEqualTo(PythonType.UNKNOWN);
   }
 
@@ -1331,28 +1505,28 @@ public class TypeInferenceV2Test {
   @Test
   void compoundAssignmentList() {
     assertThat(lastExpression("""
-        a = []
-        b = 'world'
-        a += b
-        a
-        """).typeV2().unwrappedType()).isEqualTo(LIST_TYPE);
+      a = []
+      b = 'world'
+      a += b
+      a
+      """).typeV2().unwrappedType()).isEqualTo(LIST_TYPE);
   }
 
   @Test
   void annotation_with_reassignment() {
     assertThat(lastExpression("""
-        a = "foo"
-        b: int = a
-        b
-        """).typeV2().unwrappedType()).isEqualTo(STR_TYPE);
+      a = "foo"
+      b: int = a
+      b
+      """).typeV2().unwrappedType()).isEqualTo(STR_TYPE);
   }
 
   @Test
   void annotation_without_reassignment() {
     assertThat(lastExpression("""
-        a: int
-        a
-        """).typeV2().unwrappedType()).isEqualTo(PythonType.UNKNOWN);
+      a: int
+      a
+      """).typeV2().unwrappedType()).isEqualTo(PythonType.UNKNOWN);
   }
 
   @Test
@@ -1361,15 +1535,15 @@ public class TypeInferenceV2Test {
       "f()").typeV2()).isEqualTo(PythonType.UNKNOWN);
 
     assertThat(lastExpression("""
-        def f(): pass
-        f()
-        """).typeV2()).isEqualTo(PythonType.UNKNOWN);
+      def f(): pass
+      f()
+      """).typeV2()).isEqualTo(PythonType.UNKNOWN);
 
     assertThat(lastExpression(
       """
-      class A: pass
-      A()
-      """).typeV2().displayName()).contains("A");
+        class A: pass
+        A()
+        """).typeV2().displayName()).contains("A");
   }
 
   @Test
@@ -1390,21 +1564,21 @@ public class TypeInferenceV2Test {
   void variable_outside_function_3() {
     assertThat(lastExpression(
       """
-      def foo():
-        a = 42
-      a
-      """).typeV2()).isEqualTo(PythonType.UNKNOWN);
+        def foo():
+          a = 42
+        a
+        """).typeV2()).isEqualTo(PythonType.UNKNOWN);
   }
 
   @Test
   void variable_outside_function_4() {
     assertThat(lastExpression(
       """
-      a = 42
-      def foo():
-        a = 'hello'
-      a
-      """).typeV2().unwrappedType()).isEqualTo(INT_TYPE);
+        a = 42
+        def foo():
+          a = 'hello'
+        a
+        """).typeV2().unwrappedType()).isEqualTo(INT_TYPE);
   }
 
   @Test
@@ -1521,7 +1695,7 @@ public class TypeInferenceV2Test {
     PythonType myClassPythonType = ((ClassDef) fileInput.statements().statements().get(0)).name().typeV2();
 
     List<CallExpression> calls = PythonTestUtils.getAllDescendant(fileInput, tree -> tree.is(Tree.Kind.CALL_EXPR));
-    for (CallExpression call : calls){
+    for (CallExpression call : calls) {
       PythonType calleeType = call.callee().typeV2();
       assertThat(calleeType).isInstanceOf(UnionType.class);
       assertThat(calleeType.isCompatibleWith(nonePythonType)).isTrue();
@@ -1555,32 +1729,32 @@ public class TypeInferenceV2Test {
   @Test
   void nested_try_except() {
     FileInput fileInput = inferTypes("""
-        def f(p):
-          try:
-            if p:
-              x = 42
-              type(x)
-            else:
-              x = "foo"
-              type(x)
-          except:
-            type(x)
-        def g(p):
+      def f(p):
+        try:
           if p:
-            y = 42
-            type(y)
+            x = 42
+            type(x)
           else:
-            y = "hello"
-            type(y)
+            x = "foo"
+            type(x)
+        except:
+          type(x)
+      def g(p):
+        if p:
+          y = 42
           type(y)
-        if cond:
-          z = 42
-          type(z)
         else:
-          z = "hello"
-          type(z)
+          y = "hello"
+          type(y)
+        type(y)
+      if cond:
+        z = 42
         type(z)
-        """);
+      else:
+        z = "hello"
+        type(z)
+      type(z)
+      """);
     List<CallExpression> calls = PythonTestUtils.getAllDescendant(fileInput, tree -> tree.is(Tree.Kind.CALL_EXPR));
     RegularArgument firstX = (RegularArgument) calls.get(0).arguments().get(0);
     RegularArgument secondX = (RegularArgument) calls.get(1).arguments().get(0);
@@ -1607,31 +1781,31 @@ public class TypeInferenceV2Test {
   @Test
   void nested_try_except_2() {
     FileInput fileInput = inferTypes("""
-        try:
-          if p:
-            x = 42
-            type(x)
-          else:
-            x = "foo"
-            type(x)
-        except:
+      try:
+        if p:
+          x = 42
           type(x)
-        def g(p):
-          if p:
-            y = 42
-            type(y)
-          else:
-            y = "hello"
-            type(y)
-          type(y)
-        if cond:
-          z = 42
-          type(z)
         else:
-          z = "hello"
-          type(z)
+          x = "foo"
+          type(x)
+      except:
+        type(x)
+      def g(p):
+        if p:
+          y = 42
+          type(y)
+        else:
+          y = "hello"
+          type(y)
+        type(y)
+      if cond:
+        z = 42
         type(z)
-        """);
+      else:
+        z = "hello"
+        type(z)
+      type(z)
+      """);
     List<CallExpression> calls = PythonTestUtils.getAllDescendant(fileInput, tree -> tree.is(Tree.Kind.CALL_EXPR));
     RegularArgument firstX = (RegularArgument) calls.get(0).arguments().get(0);
     RegularArgument secondX = (RegularArgument) calls.get(1).arguments().get(0);
@@ -1769,13 +1943,13 @@ public class TypeInferenceV2Test {
       .map(QualifiedExpression.class::cast)
       .get();
 
-    Assertions.assertThat(qualifiedExpression)
+    assertThat(qualifiedExpression)
       .isNotNull()
       .extracting(QualifiedExpression::typeV2)
       .isNotNull();
 
     var qualifiedExpressionType = qualifiedExpression.typeV2();
-    Assertions.assertThat(qualifiedExpressionType)
+    assertThat(qualifiedExpressionType)
       .isSameAs(fooMethodType)
       .isInstanceOf(FunctionType.class)
       .extracting(PythonType::name)
@@ -1804,13 +1978,13 @@ public class TypeInferenceV2Test {
       .map(QualifiedExpression.class::cast)
       .get();
 
-    Assertions.assertThat(qualifiedExpression)
+    assertThat(qualifiedExpression)
       .isNotNull()
       .extracting(QualifiedExpression::typeV2)
       .isNotNull();
 
     var qualifiedExpressionType = qualifiedExpression.typeV2();
-    Assertions.assertThat(qualifiedExpressionType)
+    assertThat(qualifiedExpressionType)
       .isSameAs(fooMethodType)
       .isInstanceOf(FunctionType.class)
       .extracting(PythonType::name)
@@ -1826,7 +2000,7 @@ public class TypeInferenceV2Test {
       .map(Expression::typeV2)
       .get();
 
-    Assertions.assertThat(qualifiedExpressionType).isSameAs(bType);
+    assertThat(qualifiedExpressionType).isSameAs(bType);
   }
 
   @Test
@@ -1856,7 +2030,7 @@ public class TypeInferenceV2Test {
       .map(PythonType::unwrappedType)
       .get();
 
-    Assertions.assertThat(qualifiedExpressionType)
+    assertThat(qualifiedExpressionType)
       .isSameAs(INT_TYPE);
   }
 
@@ -1872,7 +2046,7 @@ public class TypeInferenceV2Test {
       .map(QualifiedExpression.class::cast)
       .get();
 
-    Assertions.assertThat(qualifiedExpression)
+    assertThat(qualifiedExpression)
       .isNotNull()
       .extracting(QualifiedExpression::typeV2)
       .isNotNull();
@@ -1880,10 +2054,10 @@ public class TypeInferenceV2Test {
     var builtinsAppendType = LIST_TYPE.resolveMember("append").get();
 
     var qualifierType = qualifiedExpression.qualifier().typeV2().unwrappedType();
-    Assertions.assertThat(qualifierType).isSameAs(LIST_TYPE);
+    assertThat(qualifierType).isSameAs(LIST_TYPE);
 
     var qualifiedExpressionType = qualifiedExpression.typeV2();
-    Assertions.assertThat(qualifiedExpressionType)
+    assertThat(qualifiedExpressionType)
       .isSameAs(builtinsAppendType)
       .isInstanceOf(FunctionType.class)
       .extracting(PythonType::name)
@@ -1902,7 +2076,7 @@ public class TypeInferenceV2Test {
       .map(QualifiedExpression.class::cast)
       .get();
 
-    Assertions.assertThat(qualifiedExpression)
+    assertThat(qualifiedExpression)
       .isNotNull()
       .extracting(QualifiedExpression::typeV2)
       .isNotNull();
@@ -1924,7 +2098,7 @@ public class TypeInferenceV2Test {
       .map(Expression::typeV2)
       .get();
 
-    Assertions.assertThat(iType).isInstanceOf(ObjectType.class)
+    assertThat(iType).isInstanceOf(ObjectType.class)
       .extracting(PythonType::unwrappedType)
       .isInstanceOf(ClassType.class)
       .isEqualTo(INT_TYPE);
@@ -1945,7 +2119,7 @@ public class TypeInferenceV2Test {
       .map(Expression::typeV2)
       .get();
 
-    Assertions.assertThat(iType).isInstanceOf(ObjectType.class)
+    assertThat(iType).isInstanceOf(ObjectType.class)
       .extracting(PythonType::unwrappedType)
       .isInstanceOf(ClassType.class)
       .isEqualTo(INT_TYPE);
@@ -1986,9 +2160,9 @@ public class TypeInferenceV2Test {
       .map(Expression::typeV2)
       .get();
 
-    Assertions.assertThat(iType).isInstanceOf(UnionType.class);
+    assertThat(iType).isInstanceOf(UnionType.class);
     var candidates = ((UnionType) iType).candidates();
-    Assertions.assertThat(candidates)
+    assertThat(candidates)
       .allMatch(FunctionType.class::isInstance)
       .contains(fooType, barType);
   }
@@ -2013,7 +2187,7 @@ public class TypeInferenceV2Test {
       .map(Expression::typeV2)
       .get();
 
-    Assertions.assertThat(iType).isInstanceOf(ObjectType.class)
+    assertThat(iType).isInstanceOf(ObjectType.class)
       .extracting(PythonType::unwrappedType)
       .isEqualTo(INT_TYPE);
   }
@@ -2040,10 +2214,10 @@ public class TypeInferenceV2Test {
       .map(Expression::typeV2)
       .get();
 
-    Assertions.assertThat(iType).isInstanceOf(UnionType.class);
+    assertThat(iType).isInstanceOf(UnionType.class);
 
     var candidates = ((UnionType) iType).candidates();
-    Assertions.assertThat(candidates)
+    assertThat(candidates)
       .allMatch(ObjectType.class::isInstance)
       .extracting(PythonType::unwrappedType)
       .contains(INT_TYPE, STR_TYPE);
@@ -2075,7 +2249,7 @@ public class TypeInferenceV2Test {
       .map(Expression::typeV2)
       .get();
 
-    Assertions.assertThat(iType).isInstanceOf(ObjectType.class)
+    assertThat(iType).isInstanceOf(ObjectType.class)
       .extracting(PythonType::unwrappedType)
       .isInstanceOf(ClassType.class)
       .isEqualTo(STR_TYPE);
@@ -2097,7 +2271,7 @@ public class TypeInferenceV2Test {
       .map(Expression::typeV2)
       .get();
 
-    Assertions.assertThat(iType).isInstanceOf(UnknownType.class)
+    assertThat(iType).isInstanceOf(UnknownType.class)
       .isSameAs(PythonType.UNKNOWN);
   }
 
@@ -2117,7 +2291,7 @@ public class TypeInferenceV2Test {
       .map(Expression::typeV2)
       .get();
 
-    Assertions.assertThat(iType).isInstanceOf(UnknownType.class)
+    assertThat(iType).isInstanceOf(UnknownType.class)
       .isSameAs(PythonType.UNKNOWN);
   }
 
@@ -2171,7 +2345,7 @@ public class TypeInferenceV2Test {
       .map(Expression::typeV2)
       .get();
 
-    Assertions.assertThat(iType).isInstanceOf(UnknownType.class)
+    assertThat(iType).isInstanceOf(UnknownType.class)
       .isSameAs(PythonType.UNKNOWN);
   }
 
@@ -2192,13 +2366,13 @@ public class TypeInferenceV2Test {
       .map(Expression::typeV2)
       .get();
 
-    Assertions.assertThat(lType).isInstanceOf(ObjectType.class)
+    assertThat(lType).isInstanceOf(ObjectType.class)
       .extracting(PythonType::unwrappedType)
       .isInstanceOf(ClassType.class)
       .extracting(PythonType::name)
       .isEqualTo("list");
 
-    Assertions.assertThat(lType)
+    assertThat(lType)
       .extracting(ObjectType.class::cast)
       .extracting(ObjectType::attributes)
       .asInstanceOf(InstanceOfAssertFactories.LIST)
@@ -2220,13 +2394,13 @@ public class TypeInferenceV2Test {
       .map(QualifiedExpression.class::cast)
       .get();
 
-    Assertions.assertThat(qualifiedExpression)
+    assertThat(qualifiedExpression)
       .isNotNull()
       .extracting(QualifiedExpression::typeV2)
       .isNotNull();
 
     var qualifiedExpressionType = qualifiedExpression.typeV2();
-    Assertions.assertThat(qualifiedExpressionType)
+    assertThat(qualifiedExpressionType)
       .isInstanceOf(ObjectType.class)
       .extracting(ObjectType.class::cast)
       .extracting(ObjectType::type)
@@ -2249,7 +2423,7 @@ public class TypeInferenceV2Test {
       .map(Name::typeV2)
       .get();
 
-    Assertions.assertThat(xType).extracting(PythonType::unwrappedType).isSameAs(STR_TYPE);
+    assertThat(xType).extracting(PythonType::unwrappedType).isSameAs(STR_TYPE);
   }
 
   @Test
@@ -2277,7 +2451,7 @@ public class TypeInferenceV2Test {
       .map(ClassType.class::cast)
       .get();
 
-    Assertions.assertThat(childClassType.hasMetaClass()).isTrue();
+    assertThat(childClassType.hasMetaClass()).isTrue();
 
     var aType = TreeUtils.firstChild(root.statements().statements().get(3), ExpressionStatement.class::isInstance)
       .map(ExpressionStatement.class::cast)
@@ -2286,7 +2460,7 @@ public class TypeInferenceV2Test {
       .map(Expression::typeV2)
       .get();
 
-    Assertions.assertThat(aType)
+    assertThat(aType)
       .isNotNull()
       .isNotEqualTo(PythonType.UNKNOWN)
       .extracting(PythonType::unwrappedType)
@@ -2311,15 +2485,15 @@ public class TypeInferenceV2Test {
       .get();
 
 
-    Assertions.assertThat(paramType).isInstanceOf(UnionType.class);
-    Assertions.assertThat(paramType.candidates())
+    assertThat(paramType).isInstanceOf(UnionType.class);
+    assertThat(paramType.candidates())
       .hasSize(2);
 
     var candidatesUnwrappedType = paramType.candidates().stream()
       .map(PythonType::unwrappedType)
       .toList();
 
-    Assertions.assertThat(candidatesUnwrappedType)
+    assertThat(candidatesUnwrappedType)
       .contains(INT_TYPE, STR_TYPE);
   }
 
@@ -2338,16 +2512,16 @@ public class TypeInferenceV2Test {
       .map(Expression::typeV2)
       .get();
 
-    Assertions.assertThat(paramType).isSameAs(PythonType.UNKNOWN);
+    assertThat(paramType).isSameAs(PythonType.UNKNOWN);
   }
 
   @Test
   void list_comprehension() {
     assertThat(lastExpression(
       """
-      x = [a for a in foo()]
-      x
-      """
+        x = [a for a in foo()]
+        x
+        """
     ).typeV2().unwrappedType()).isEqualTo(LIST_TYPE);
   }
 
@@ -2355,9 +2529,9 @@ public class TypeInferenceV2Test {
   void set_comprehension() {
     assertThat(lastExpression(
       """
-      x = {a for a in foo()}
-      x
-      """
+        x = {a for a in foo()}
+        x
+        """
     ).typeV2().unwrappedType()).isEqualTo(SET_TYPE);
   }
 
@@ -2365,9 +2539,9 @@ public class TypeInferenceV2Test {
   void dict_comprehension() {
     assertThat(lastExpression(
       """
-      x = {num: num**2 for num in numbers()}
-      x
-      """
+        x = {num: num**2 for num in numbers()}
+        x
+        """
     ).typeV2().unwrappedType()).isEqualTo(DICT_TYPE);
   }
 
@@ -2375,9 +2549,9 @@ public class TypeInferenceV2Test {
   void comprehension_if() {
     assertThat(lastExpression(
       """
-      x = [num for num in numbers if num % 2 == 0]
-      x
-      """
+        x = [num for num in numbers if num % 2 == 0]
+        x
+        """
     ).typeV2().unwrappedType()).isEqualTo(LIST_TYPE);
   }
 
@@ -2385,9 +2559,9 @@ public class TypeInferenceV2Test {
   void generator_expression() {
     assertThat(lastExpression(
       """
-      x = (num**2 for num in numbers())
-      x
-      """
+        x = (num**2 for num in numbers())
+        x
+        """
     ).typeV2().unwrappedType()).isEqualTo(PythonType.UNKNOWN);
   }
 
@@ -2395,10 +2569,10 @@ public class TypeInferenceV2Test {
   void return_type_of_call_expression_1() {
     assertThat(lastExpression(
       """
-      x = [1,2,3]
-      a = x.append(42)
-      a
-      """
+        x = [1,2,3]
+        a = x.append(42)
+        a
+        """
     ).typeV2().unwrappedType()).isEqualTo(NONE_TYPE);
   }
 
@@ -2406,10 +2580,10 @@ public class TypeInferenceV2Test {
   void return_type_of_call_expression_2() {
     assertThat(lastExpression(
       """
-      x = [1,2,3]
-      a = x.sort()
-      a
-      """
+        x = [1,2,3]
+        a = x.sort()
+        a
+        """
     ).typeV2().unwrappedType()).isEqualTo(NONE_TYPE);
   }
 
@@ -2461,12 +2635,14 @@ public class TypeInferenceV2Test {
     UnionType acosType = (UnionType) ((ExpressionStatement) fileInput.statements().statements().get(1)).expressions().get(0).typeV2();
     assertThat(acosType.candidates()).allMatch(p -> p instanceof FunctionType);
     assertThat(acosType.candidates()).extracting(PythonType::name).containsExactly("acos", "acos");
-    assertThat(acosType.candidates()).map(FunctionType.class::cast).extracting(FunctionType::returnType).extracting(PythonType::unwrappedType).containsExactly(FLOAT_TYPE, FLOAT_TYPE);
+    assertThat(acosType.candidates()).map(FunctionType.class::cast).extracting(FunctionType::returnType).extracting(PythonType::unwrappedType).containsExactly(FLOAT_TYPE,
+      FLOAT_TYPE);
 
     UnionType atanType = (UnionType) ((ExpressionStatement) fileInput.statements().statements().get(2)).expressions().get(0).typeV2();
     assertThat(atanType.candidates()).allMatch(p -> p instanceof FunctionType);
     assertThat(atanType.candidates()).extracting(PythonType::name).containsExactly("atan", "atan");
-    assertThat(atanType.candidates()).map(FunctionType.class::cast).extracting(FunctionType::returnType).extracting(PythonType::unwrappedType).containsExactly(FLOAT_TYPE, FLOAT_TYPE);
+    assertThat(atanType.candidates()).map(FunctionType.class::cast).extracting(FunctionType::returnType).extracting(PythonType::unwrappedType).containsExactly(FLOAT_TYPE,
+      FLOAT_TYPE);
   }
 
   @Test
@@ -2487,11 +2663,13 @@ public class TypeInferenceV2Test {
       .get();
     UnionType acosType1 = (UnionType) acosExpr1.typeV2();
     assertThat(acosType1.candidates()).allMatch(p -> p instanceof FunctionType);
-    assertThat(acosType1.candidates()).map(FunctionType.class::cast).extracting(FunctionType::returnType).extracting(PythonType::unwrappedType).containsExactly(FLOAT_TYPE, FLOAT_TYPE);
+    assertThat(acosType1.candidates()).map(FunctionType.class::cast).extracting(FunctionType::returnType).extracting(PythonType::unwrappedType).containsExactly(FLOAT_TYPE,
+      FLOAT_TYPE);
 
     UnionType acosType2 = (UnionType) ((ExpressionStatement) fileInput.statements().statements().get(1)).expressions().get(0).typeV2();
     assertThat(acosType2.candidates()).allMatch(p -> p instanceof FunctionType);
-    assertThat(acosType2.candidates()).map(FunctionType.class::cast).extracting(FunctionType::returnType).extracting(PythonType::unwrappedType).containsExactly(FLOAT_TYPE, FLOAT_TYPE);
+    assertThat(acosType2.candidates()).map(FunctionType.class::cast).extracting(FunctionType::returnType).extracting(PythonType::unwrappedType).containsExactly(FLOAT_TYPE,
+      FLOAT_TYPE);
   }
 
   @Test
@@ -2643,10 +2821,10 @@ public class TypeInferenceV2Test {
   void imported_symbol_call_return_type() {
     assertThat(lastExpression(
       """
-      import fcntl
-      ret = fcntl.flock(..., ...)
-      ret
-      """
+        import fcntl
+        ret = fcntl.flock(..., ...)
+        ret
+        """
     ).typeV2().unwrappedType()).isEqualTo(NONE_TYPE);
   }
 
@@ -2654,9 +2832,9 @@ public class TypeInferenceV2Test {
   void basic_imported_symbol() {
     assertThat(lastExpression(
       """
-      import fcntl
-      fcntl
-      """
+        import fcntl
+        fcntl
+        """
     ).typeV2()).isInstanceOf(ModuleType.class);
   }
 
@@ -2775,10 +2953,10 @@ public class TypeInferenceV2Test {
   void basic_imported_symbols() {
     FileInput fileInput = inferTypes(
       """
-      import fcntl, math
-      fcntl
-      math
-      """
+        import fcntl, math
+        fcntl
+        math
+        """
     );
     PythonType fnctlModule = ((ExpressionStatement) fileInput.statements().statements().get(1)).expressions().get(0).typeV2();
     assertThat(fnctlModule).isInstanceOf(ModuleType.class);
@@ -2789,8 +2967,8 @@ public class TypeInferenceV2Test {
     assertThat(((UnionType) mathModule.resolveMember("acos").get()).candidates()).allMatch(FunctionType.class::isInstance);
   }
 
-  @Test
   // TODO SONARPY-2176 ProjectLevelSymbolTable#getType should be able to resolve types when there is a conflict between a member and a subpackage
+  @Test
   void import_conflict_between_member_and_submodule() {
     var statement = lastExpression("""
       import opentracing.tracer.Tracer as ottt
@@ -2820,7 +2998,7 @@ public class TypeInferenceV2Test {
           ...
         x
       """).typeV2();
-    Assertions.assertThat(xType).isSameAs(PythonType.UNKNOWN);
+    assertThat(xType).isSameAs(PythonType.UNKNOWN);
 
     xType = lastExpression("""
       def foo(x: int):
@@ -2828,7 +3006,7 @@ public class TypeInferenceV2Test {
           ...
         x
       """).typeV2();
-    Assertions.assertThat(xType.unwrappedType()).isSameAs(INT_TYPE);
+    assertThat(xType.unwrappedType()).isSameAs(INT_TYPE);
 
     xType = lastExpression("""
       def foo(x: int):
@@ -2836,7 +3014,7 @@ public class TypeInferenceV2Test {
           ...
         x
       """).typeV2();
-    Assertions.assertThat(xType.unwrappedType()).isSameAs(INT_TYPE);
+    assertThat(xType.unwrappedType()).isSameAs(INT_TYPE);
 
     xType = lastExpression("""
       def foo():
@@ -2845,7 +3023,7 @@ public class TypeInferenceV2Test {
           ...
         x
       """).typeV2();
-    Assertions.assertThat(xType.unwrappedType()).isSameAs(INT_TYPE);
+    assertThat(xType.unwrappedType()).isSameAs(INT_TYPE);
 
     xType = lastExpression("""
       def foo(x: list):
@@ -2854,7 +3032,7 @@ public class TypeInferenceV2Test {
         x
       """).typeV2();
 
-    Assertions.assertThat(xType.unwrappedType()).isSameAs(LIST_TYPE);
+    assertThat(xType.unwrappedType()).isSameAs(LIST_TYPE);
   }
 
   @Test
@@ -2865,11 +3043,11 @@ public class TypeInferenceV2Test {
         y
       """).typeV2();
 
-    Assertions.assertThat(yType.candidates())
+    assertThat(yType.candidates())
       .allMatch(ObjectType.class::isInstance)
       .extracting(PythonType::unwrappedType)
       .containsOnly(INT_TYPE, STR_TYPE);
-    Assertions.assertThat(yType.typeSource()).isSameAs(TypeSource.TYPE_HINT);
+    assertThat(yType.typeSource()).isSameAs(TypeSource.TYPE_HINT);
   }
 
   @Test
@@ -2901,15 +3079,15 @@ public class TypeInferenceV2Test {
     var dType = ((ExpressionStatement) statements.get(statements.size() - 2)).expressions().get(0).typeV2();
     var eType = ((ExpressionStatement) statements.get(statements.size() - 1)).expressions().get(0).typeV2();
 
-    Assertions.assertThat(aType.unwrappedType()).isSameAs(INT_TYPE);
-    Assertions.assertThat(aType.typeSource()).isSameAs(TypeSource.TYPE_HINT);
+    assertThat(aType.unwrappedType()).isSameAs(INT_TYPE);
+    assertThat(aType.typeSource()).isSameAs(TypeSource.TYPE_HINT);
 
-    Assertions.assertThat(bType).isSameAs(PythonType.UNKNOWN);
-    Assertions.assertThat(cType).isSameAs(PythonType.UNKNOWN);
-    Assertions.assertThat(dType).isSameAs(PythonType.UNKNOWN);
+    assertThat(bType).isSameAs(PythonType.UNKNOWN);
+    assertThat(cType).isSameAs(PythonType.UNKNOWN);
+    assertThat(dType).isSameAs(PythonType.UNKNOWN);
 
-    Assertions.assertThat(eType.unwrappedType()).isSameAs(INT_TYPE);
-    Assertions.assertThat(eType.typeSource()).isSameAs(TypeSource.EXACT);
+    assertThat(eType.unwrappedType()).isSameAs(INT_TYPE);
+    assertThat(eType.typeSource()).isSameAs(TypeSource.EXACT);
   }
 
   @Test
@@ -2939,12 +3117,12 @@ public class TypeInferenceV2Test {
     var bType = ((ExpressionStatement) statements.get(statements.size() - 2)).expressions().get(0).typeV2();
     var cType = ((ExpressionStatement) statements.get(statements.size() - 1)).expressions().get(0).typeV2();
 
-    Assertions.assertThat(aType).isInstanceOf(UnionType.class);
-    Assertions.assertThat(((UnionType) aType).candidates()).extracting(PythonType::unwrappedType).containsOnly(INT_TYPE, STR_TYPE);
+    assertThat(aType).isInstanceOf(UnionType.class);
+    assertThat(((UnionType) aType).candidates()).extracting(PythonType::unwrappedType).containsOnly(INT_TYPE, STR_TYPE);
 
 
-    Assertions.assertThat(bType).isSameAs(PythonType.UNKNOWN);
-    Assertions.assertThat(cType).isSameAs(PythonType.UNKNOWN);
+    assertThat(bType).isSameAs(PythonType.UNKNOWN);
+    assertThat(cType).isSameAs(PythonType.UNKNOWN);
   }
 
   @Test
@@ -2962,7 +3140,7 @@ public class TypeInferenceV2Test {
       .orElseGet(List::of);
 
     var fType = ((ExpressionStatement) statements.get(statements.size() - 1)).expressions().get(0).typeV2();
-    Assertions.assertThat(fType).isSameAs(PythonType.UNKNOWN);
+    assertThat(fType).isSameAs(PythonType.UNKNOWN);
   }
 
   @Test
@@ -2977,7 +3155,7 @@ public class TypeInferenceV2Test {
       .get();
 
     var type = literal.typeV2();
-    Assertions.assertThat(type.unwrappedType()).isSameAs(STR_TYPE);
+    assertThat(type.unwrappedType()).isSameAs(STR_TYPE);
   }
 
 
@@ -3172,8 +3350,142 @@ public class TypeInferenceV2Test {
         pass
       global C
       """);
-    Assertions.assertThat(typesBySymbol).isNotEmpty();
-    Assertions.assertThat(typesBySymbol.values().iterator().next()).isInstanceOf(ClassType.class);
+    assertThat(typesBySymbol).isNotEmpty();
+    assertThat(typesBySymbol.values().iterator().next()).isInstanceOf(ClassType.class);
+  }
+
+  @Test
+  void wildCardImportsMultiFile() {
+    FileInput tree = parseWithoutSymbols("""
+      def foo(): pass
+      def bar(): pass
+      """);
+    ProjectLevelSymbolTable projectLevelSymbolTable = new ProjectLevelSymbolTable();
+    var modFile = pythonFile("mod.py");
+    projectLevelSymbolTable.addModule(tree, "", modFile);
+    ProjectLevelTypeTable projectLevelTypeTable = new ProjectLevelTypeTable(projectLevelSymbolTable);
+
+    var lines = """
+      from mod import *
+      from mod import foo as imported_foo
+      (foo, imported_foo)
+      """;
+    TupleImpl tupleExpr = (TupleImpl) lastExpression(lines, projectLevelTypeTable);
+    List<Expression> tupleExpressions = tupleExpr.elements();
+    Expression fooExpr = tupleExpressions.get(0);
+    Expression importedFooExpr = tupleExpressions.get(1);
+
+    assertThat(fooExpr.typeV2()).isInstanceOf(FunctionType.class);
+    assertThat(importedFooExpr.typeV2()).isInstanceOf(FunctionType.class);
+  }
+
+  @Test
+  void conflictingWildCardImportsMultiFile() {
+    TupleImpl tupleExpr = (TupleImpl) new TestProject()
+      .addModule("mod1.py", "def foo(): pass")
+      .addModule("mod2.py", "def foo(): pass")
+      .lastExpression("""
+        from mod1 import *
+        from mod2 import *
+        from mod1 import foo as incorrect_foo
+        from mod2 import foo as correct_foo
+        (foo, incorrect_foo, correct_foo)
+        """);
+
+    List<Expression> tupleExpressions = tupleExpr.elements();
+    Expression fooExpr = tupleExpressions.get(0);
+    Expression incorrectFoo = tupleExpressions.get(1);
+    Expression correctFoo = tupleExpressions.get(2);
+
+    assertThat(fooExpr.typeV2())
+      .isInstanceOf(FunctionType.class)
+      .isEqualTo(correctFoo.typeV2())
+      .isNotEqualTo(incorrectFoo.typeV2());
+  }
+
+  public static Stream<Arguments> wildCardImportConflictsWithOtherImportMultiFileSource() {
+    return Stream.of(
+      Arguments.argumentSet("wildcard first", """
+        from mod1 import *
+        from mod2 import foo
+        import mod1
+        import mod2
+        (foo, mod1.foo, mod2.foo)
+        """),
+      // foo should be mod2.foo, not mod1.foo. Since wildcard imports are only assigned to names without a symbol, foo will be equal to mod1.foo. See SONARPY-2357
+      Arguments.argumentSet("wildcard second", """
+        from mod1 import foo
+        from mod2 import *
+        import mod1
+        import mod2
+        (foo, mod2.foo, mod1.foo)
+        """)
+    );
+  }
+
+  @MethodSource("wildCardImportConflictsWithOtherImportMultiFileSource")
+  @ParameterizedTest
+  void wildCardImportConflictsWithOtherImportMultiFile(String sourcecode) {
+    TupleImpl tupleExpr = (TupleImpl) new TestProject()
+      .addModule("mod1.py", "def foo(): pass")
+      .addModule("mod2.py", "def foo(): pass")
+      .lastExpression(sourcecode);
+
+    List<Expression> tupleExpressions = tupleExpr.elements();
+    Expression fooExpr = tupleExpressions.get(0);
+    Expression incorrectFoo = tupleExpressions.get(1);
+    Expression correctFoo = tupleExpressions.get(2);
+
+    assertThat(fooExpr.typeV2())
+      .isInstanceOf(FunctionType.class)
+      .isEqualTo(correctFoo.typeV2())
+      .isNotEqualTo(incorrectFoo.typeV2());
+  }
+
+  @Test
+  void wildCardInInnerScopeMultiFile() {
+    Expression fooExpr = new TestProject()
+      .addModule("mod.py", "def foo(): pass")
+      .lastExpression("""
+        def bar():
+          from mod import *
+        foo
+        """);
+
+    // foo should be UNKNOWN, but is resolved to foo because wildcard imports don't respect scoping. See SONARPY-2357
+    assertThat(fooExpr.typeV2()).isNotEqualTo(PythonType.UNKNOWN);
+  }
+
+  @Test
+  void wildCardAfterUseMultiFile() {
+    Expression vExpr = new TestProject()
+      .addModule("mod.py", "def foo(): pass")
+      .lastExpression("""
+        v = foo
+        from mod import *
+        v
+        """);
+
+    assertThat(vExpr.typeV2()).isEqualTo(PythonType.UNKNOWN);
+  }
+
+  @Test
+  void reexportedWildcardImport() {
+    TupleImpl tupleExpr = new TestProject()
+      .addModule("mod1.py", "def foo(): pass")
+      .addModule("mod2.py", "from mod1 import *")
+      .lastExpressionAsTuple("""
+        import mod2
+        from mod1 import foo as actual_foo
+        (mod2.foo, actual_foo)
+        """);
+
+    var importedFoo = tupleExpr.elements().get(0);
+    var actualFoo = tupleExpr.elements().get(1);
+
+    assertThat(importedFoo.typeV2())
+      .isEqualTo(PythonType.UNKNOWN)
+      .isNotEqualTo(actualFoo.typeV2());
   }
 
   private static Map<SymbolV2, Set<PythonType>> inferTypesBySymbol(String lines) {
@@ -3197,7 +3509,11 @@ public class TypeInferenceV2Test {
   }
 
   public static Expression lastExpression(String lines) {
-    FileInput fileInput = inferTypes(lines);
+    return lastExpression(lines, PROJECT_LEVEL_TYPE_TABLE);
+  }
+
+  public static Expression lastExpression(String lines, ProjectLevelTypeTable projectLevelTypeTable) {
+    FileInput fileInput = inferTypes(lines, projectLevelTypeTable);
     Statement statement = lastStatement(fileInput.statements());
     if (!(statement instanceof ExpressionStatement)) {
       assertThat(statement).isInstanceOf(FunctionDef.class);
@@ -3212,5 +3528,26 @@ public class TypeInferenceV2Test {
   private static Statement lastStatement(StatementList statementList) {
     List<Statement> statements = statementList.statements();
     return statements.get(statements.size() - 1);
+  }
+
+  private static class TestProject {
+    private final ProjectLevelSymbolTable projectLevelSymbolTable = new ProjectLevelSymbolTable();
+
+    public TestProject addModule(String moduleName, String code) {
+      FileInput tree = parseWithoutSymbols(code);
+      projectLevelSymbolTable.addModule(tree, "", pythonFile(moduleName));
+      return this;
+    }
+
+    public Expression lastExpression(String code) {
+      ProjectLevelTypeTable projectLevelTypeTable = new ProjectLevelTypeTable(projectLevelSymbolTable);
+      return TypeInferenceV2Test.lastExpression(code, projectLevelTypeTable);
+    }
+
+    public TupleImpl lastExpressionAsTuple(String code) {
+      Expression lastExpr = lastExpression(code);
+      assertThat(lastExpr).isInstanceOf(TupleImpl.class);
+      return (TupleImpl) lastExpr;
+    }
   }
 }

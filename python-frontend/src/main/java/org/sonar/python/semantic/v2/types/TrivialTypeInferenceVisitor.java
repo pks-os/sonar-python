@@ -24,8 +24,10 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Deque;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.Predicate;
@@ -35,9 +37,11 @@ import org.sonar.plugins.python.api.PythonFile;
 import org.sonar.plugins.python.api.tree.AliasedName;
 import org.sonar.plugins.python.api.tree.AnnotatedAssignment;
 import org.sonar.plugins.python.api.tree.ArgList;
+import org.sonar.plugins.python.api.tree.AssignmentExpression;
 import org.sonar.plugins.python.api.tree.AssignmentStatement;
 import org.sonar.plugins.python.api.tree.BaseTreeVisitor;
 import org.sonar.plugins.python.api.tree.BinaryExpression;
+import org.sonar.plugins.python.api.tree.CallExpression;
 import org.sonar.plugins.python.api.tree.ClassDef;
 import org.sonar.plugins.python.api.tree.ComprehensionExpression;
 import org.sonar.plugins.python.api.tree.DictCompExpression;
@@ -79,6 +83,8 @@ import org.sonar.python.tree.NoneExpressionImpl;
 import org.sonar.python.tree.NumericLiteralImpl;
 import org.sonar.python.tree.SetLiteralImpl;
 import org.sonar.python.tree.StringLiteralImpl;
+import org.sonar.python.tree.SubscriptionExpressionImpl;
+import org.sonar.python.tree.TreeUtils;
 import org.sonar.python.tree.TupleImpl;
 import org.sonar.python.tree.UnaryExpressionImpl;
 import org.sonar.python.types.v2.ClassType;
@@ -87,10 +93,13 @@ import org.sonar.python.types.v2.Member;
 import org.sonar.python.types.v2.ModuleType;
 import org.sonar.python.types.v2.ObjectType;
 import org.sonar.python.types.v2.PythonType;
+import org.sonar.python.types.v2.SpecialFormType;
 import org.sonar.python.types.v2.TriBool;
 import org.sonar.python.types.v2.TypeCheckBuilder;
+import org.sonar.python.types.v2.TypeChecker;
 import org.sonar.python.types.v2.TypeOrigin;
 import org.sonar.python.types.v2.TypeSource;
+import org.sonar.python.types.v2.TypeWrapper;
 import org.sonar.python.types.v2.UnionType;
 import org.sonar.python.types.v2.UnknownType;
 
@@ -106,6 +115,10 @@ public class TrivialTypeInferenceVisitor extends BaseTreeVisitor {
 
   private final Deque<Scope> typeStack = new ArrayDeque<>();
   private final Set<String> importedModulesFQN = new HashSet<>();
+  private final TypeChecker typeChecker;
+  private final List<String> typeVarNames = new ArrayList<>();
+
+  private final Map<String, TypeWrapper> wildcardImportedTypes = new HashMap<>();
 
   private record Scope(PythonType type, String scopeFullyQualifiedName) {}
 
@@ -115,6 +128,7 @@ public class TrivialTypeInferenceVisitor extends BaseTreeVisitor {
     this.moduleName = pythonFile.fileName();
     this.fileId = path != null ? path.toString() : pythonFile.toString();
     this.fullyQualifiedModuleName = fullyQualifiedModuleName;
+    this.typeChecker = new TypeChecker(projectLevelTypeTable);
   }
 
   public Set<String> importedModulesFQN() {
@@ -268,6 +282,9 @@ public class TrivialTypeInferenceVisitor extends BaseTreeVisitor {
       .withHasDecorators(!classDef.decorators().isEmpty())
       .withDefinitionLocation(locationInFile(className, fileId));
     resolveTypeHierarchy(classDef, classTypeBuilder);
+    if (classDef.typeParams() != null) {
+      classTypeBuilder.withIsGeneric(true);
+    }
     ClassType classType = classTypeBuilder.build();
 
     if (currentType() instanceof ClassType ownerClass) {
@@ -280,7 +297,7 @@ public class TrivialTypeInferenceVisitor extends BaseTreeVisitor {
     return classType;
   }
 
-  static void resolveTypeHierarchy(ClassDef classDef, ClassTypeBuilder classTypeBuilder) {
+  void resolveTypeHierarchy(ClassDef classDef, ClassTypeBuilder classTypeBuilder) {
     Optional.of(classDef)
       .map(ClassDef::args)
       .map(ArgList::arguments)
@@ -288,14 +305,14 @@ public class TrivialTypeInferenceVisitor extends BaseTreeVisitor {
       .flatMap(Collection::stream)
       .forEach(argument -> {
         if (argument instanceof RegularArgument regularArgument) {
-          addParentClass(classTypeBuilder, regularArgument);
+          this.addParentClass(classTypeBuilder, regularArgument);
         } else {
           classTypeBuilder.addSuperClass(PythonType.UNKNOWN);
         }
       });
   }
 
-  private static void addParentClass(ClassTypeBuilder classTypeBuilder, RegularArgument regularArgument) {
+  private void addParentClass(ClassTypeBuilder classTypeBuilder, RegularArgument regularArgument) {
     Name keyword = regularArgument.keywordArgument();
     // TODO: SONARPY-1871 store names if not resolved properly
     if (keyword != null) {
@@ -307,7 +324,15 @@ public class TrivialTypeInferenceVisitor extends BaseTreeVisitor {
     }
     PythonType argumentType = getTypeV2FromArgument(regularArgument);
     classTypeBuilder.addSuperClass(argumentType);
-    // TODO: SONARPY-1869 handle generics
+    if (isParentAGenericClass(regularArgument, argumentType)) {
+      classTypeBuilder.withIsGeneric(true);
+    }
+  }
+
+  private boolean isParentAGenericClass(RegularArgument regularArgument, PythonType argumentType) {
+    return typeChecker.typeCheckBuilder().isGeneric().check(argumentType) == TriBool.TRUE
+      && regularArgument.expression() instanceof SubscriptionExpression subscriptionExpression
+      && subscriptionExpression.subscripts().expressions().stream().anyMatch(expression -> expression instanceof Name name && typeVarNames.contains(name.name()));
   }
 
   private static PythonType getTypeV2FromArgument(RegularArgument regularArgument) {
@@ -413,6 +438,17 @@ public class TrivialTypeInferenceVisitor extends BaseTreeVisitor {
     }
     importedModulesFQN.add(String.join(".", fromModuleFqn));
     setTypeToImportFromStatement(importFrom, fromModuleFqn);
+
+    if(importFrom.isWildcardImport()) {
+      collectWildcardImportedSymbols(fromModuleFqn);
+    }
+  }
+
+  private void collectWildcardImportedSymbols(List<String> moduleFqn) {
+    PythonType resolvedModuleType = projectLevelTypeTable.getModuleType(moduleFqn);
+    if(resolvedModuleType instanceof ModuleType moduleType) {
+      wildcardImportedTypes.putAll(moduleType.members());
+    }
   }
 
   private static List<String> dottedNameToPartFqn(DottedName dottedName) {
@@ -474,6 +510,44 @@ public class TrivialTypeInferenceVisitor extends BaseTreeVisitor {
           addStaticFieldToClass(lhsName, lhsName.typeV2());
         }
       });
+  }
+
+  @Override
+  public void visitCallExpression(CallExpression callExpression) {
+    super.visitCallExpression(callExpression);
+    assignPossibleTypeVar(callExpression);
+  }
+
+  private void assignPossibleTypeVar(CallExpression callExpression) {
+    PythonType pythonType = callExpression.callee().typeV2();
+    TriBool check = typeChecker.typeCheckBuilder().isTypeWithName("typing.TypeVar").check(pythonType);
+    if (check == TriBool.TRUE) {
+      Tree parent = TreeUtils.firstAncestor(callExpression, t -> t.is(Tree.Kind.ASSIGNMENT_STMT, Tree.Kind.ANNOTATED_ASSIGNMENT, Tree.Kind.ASSIGNMENT_EXPRESSION));
+      Optional<Name> assignedName = Optional.empty();
+      if (parent instanceof AssignmentStatement assignmentStatement) {
+        assignedName = extractAssignedName(assignmentStatement);
+      }
+      if (parent instanceof AnnotatedAssignment annotatedAssignment) {
+        assignedName = extractAssignedName(annotatedAssignment);
+      }
+      if (parent instanceof AssignmentExpression assignmentExpression) {
+        assignedName = extractAssignedName(assignmentExpression);
+      }
+      assignedName.ifPresent(name -> typeVarNames.add(name.name()));
+    }
+  }
+
+  private static Optional<Name> extractAssignedName(AssignmentExpression assignmentExpression) {
+    return Optional.of(assignmentExpression.lhsName()).map(Name.class::cast);
+  }
+
+  private static Optional<Name> extractAssignedName(AnnotatedAssignment annotatedAssignment) {
+    return Optional.of(annotatedAssignment.variable()).filter(v -> v.is(Tree.Kind.NAME)).map(Name.class::cast);
+  }
+
+  private static Optional<Name> extractAssignedName(AssignmentStatement assignmentStatement) {
+    return assignmentStatement.lhsExpressions().stream().findFirst()
+      .map(ExpressionList::expressions).stream().flatMap(List::stream).findFirst().filter(v -> v.is(Tree.Kind.NAME)).map(Name.class::cast);
   }
 
   private static Optional<NameImpl> getFirstAssignmentName(AssignmentStatement assignmentStatement) {
@@ -545,14 +619,29 @@ public class TrivialTypeInferenceVisitor extends BaseTreeVisitor {
     }
   }
 
+  @Override
+  public void visitSubscriptionExpression(SubscriptionExpression subscriptionExpression) {
+    super.visitSubscriptionExpression(subscriptionExpression);
+    PythonType pythonType = subscriptionExpression.object().typeV2();
+    if (typeChecker.typeCheckBuilder().isGeneric().check(pythonType) == TriBool.TRUE) {
+      ((SubscriptionExpressionImpl) subscriptionExpression).typeV2(pythonType);
+    }
+  }
 
   @Override
   public void visitName(Name name) {
     SymbolV2 symbolV2 = name.symbolV2();
     if (symbolV2 == null) {
 //    This part could be affected by SONARPY-1802
-      projectLevelTypeTable.getBuiltinsModule().resolveMember(name.name())
-        .ifPresent(type -> setTypeToName(name, type));
+      var builtInType = projectLevelTypeTable.getBuiltinsModule().resolveMember(name.name());
+      if (builtInType.isPresent()) {
+        setTypeToName(name, builtInType.get());
+      } else {
+        TypeWrapper wildcardImportedType = wildcardImportedTypes.get(name.name());
+        if (wildcardImportedType != null) {
+          setTypeToName(name, wildcardImportedType.type());
+        }
+      }
       return;
     }
 
@@ -581,13 +670,15 @@ public class TrivialTypeInferenceVisitor extends BaseTreeVisitor {
       // TODO: classes (SONARPY-1829) and functions should be propagated like other types
       .filter(TrivialTypeInferenceVisitor::shouldTypeBeEagerlyPropagated)
       .ifPresent(type -> setTypeToName(name, type));
+
   }
 
   private static boolean shouldTypeBeEagerlyPropagated(PythonType t) {
     return (t instanceof ClassType)
            || (t instanceof FunctionType)
            || (t instanceof ModuleType)
-           || (t instanceof UnknownType.UnresolvedImportType);
+           || (t instanceof UnknownType.UnresolvedImportType)
+           || (t instanceof SpecialFormType);
   }
 
   private PythonType currentType() {

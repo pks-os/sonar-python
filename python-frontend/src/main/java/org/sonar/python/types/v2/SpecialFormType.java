@@ -17,27 +17,17 @@
  * along with this program; if not, write to the Free Software Foundation,
  * Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
  */
-package org.sonar.python.checks;
+package org.sonar.python.types.v2;
 
-import java.util.List;
-import org.junit.jupiter.api.Test;
-import org.sonar.python.checks.utils.PythonCheckVerifier;
+public class SpecialFormType implements PythonType {
 
-class GenericTypeWithoutArgumentCheckTest {
+  private final String fullyQualifiedName;
 
-  @Test
-  void test() {
-    PythonCheckVerifier.verify("src/test/resources/checks/genericTypeWithoutArgument.py", new GenericTypeWithoutArgumentCheck());
+  public SpecialFormType(String fullyQualifiedName) {
+    this.fullyQualifiedName = fullyQualifiedName;
   }
 
-  @Test
-  void test_cross_file() {
-    PythonCheckVerifier.verify(
-      List.of(
-        "src/test/resources/checks/genericTypeWithoutArgumentImported.py",
-        "src/test/resources/checks/genericTypeWithoutArgumentImporting.py"
-      ),
-      new GenericTypeWithoutArgumentCheck()
-    );
+  public String fullyQualifiedName() {
+    return fullyQualifiedName;
   }
 }
