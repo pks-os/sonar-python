@@ -4,29 +4,24 @@
  * mailto:info AT sonarsource DOT com
  *
  * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation; either
- * version 3 of the License, or (at your option) any later version.
+ * modify it under the terms of the Sonar Source-Available License Version 1, as published by SonarSource SA.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the Sonar Source-Available License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public License
- * along with this program; if not, write to the Free Software Foundation,
- * Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * You should have received a copy of the Sonar Source-Available License
+ * along with this program; if not, see https://sonarsource.com/license/ssal/
  */
 package org.sonar.python.semantic.v2.types;
 
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import java.util.stream.Collectors;
 import org.sonar.plugins.python.api.tree.AliasedName;
 import org.sonar.plugins.python.api.tree.AnnotatedAssignment;
 import org.sonar.plugins.python.api.tree.AssignmentStatement;
@@ -43,7 +38,6 @@ import org.sonar.plugins.python.api.tree.Parameter;
 import org.sonar.plugins.python.api.tree.Statement;
 import org.sonar.python.semantic.v2.SymbolV2;
 import org.sonar.python.tree.NameImpl;
-import org.sonar.python.types.v2.PythonType;
 
 public class PropagationVisitor extends BaseTreeVisitor {
   private final Map<SymbolV2, Set<Propagation>> propagationsByLhs;
@@ -178,9 +172,9 @@ public class PropagationVisitor extends BaseTreeVisitor {
             .findFirst()
             .filter(NameImpl.class::isInstance)
             .map(NameImpl.class::cast)
-            .ifPresent(i -> {
-              var symbol = i.symbolV2();
-              var assignment = new LoopAssignment(symbol, i, rhsExpression, propagationsByLhs);
+            .ifPresent(name -> {
+              var symbol = name.symbolV2();
+              var assignment = new LoopAssignment(symbol, name, rhsExpression);
               assignmentsByAssignmentStatement.put(forStatement, assignment);
               propagationsByLhs.computeIfAbsent(symbol, s -> new HashSet<>()).add(assignment);
             })
@@ -197,43 +191,11 @@ public class PropagationVisitor extends BaseTreeVisitor {
       if (symbol == null) {
         return;
       }
-      var assignment = new Assignment(symbol, lhs, rhsExpression, propagationsByLhs);
+      var assignment = new Assignment(symbol, lhs, rhsExpression);
       assignmentsByAssignmentStatement.put(assignmentStatement, assignment);
       propagationsByLhs.computeIfAbsent(symbol, s -> new HashSet<>()).add(assignment);
     }
   }
 
-  public Map<SymbolV2, Set<PythonType>> processPropagations(Set<SymbolV2> trackedVars) {
-    Set<Propagation> propagations = new HashSet<>();
-    Set<SymbolV2> initializedVars = new HashSet<>();
 
-    propagationsByLhs.forEach((lhs, props) -> {
-      if (trackedVars.contains(lhs)) {
-        props.stream()
-          .filter(Assignment.class::isInstance)
-          .map(Assignment.class::cast)
-          .forEach(a -> a.computeDependencies(a.rhs(), trackedVars));
-        propagations.addAll(props);
-      }
-    });
-
-    applyPropagations(propagations, initializedVars, true);
-    applyPropagations(propagations, initializedVars, false);
-    return propagations.stream().collect(Collectors.groupingBy(Propagation::lhsSymbol, Collectors.mapping(Propagation::rhsType, Collectors.toSet())));
-  }
-
-  private static void applyPropagations(Set<Propagation> propagations, Set<SymbolV2> initializedVars, boolean checkDependenciesReadiness) {
-    Set<Propagation> workSet = new HashSet<>(propagations);
-    while (!workSet.isEmpty()) {
-      Iterator<Propagation> iterator = workSet.iterator();
-      Propagation propagation = iterator.next();
-      iterator.remove();
-      if (!checkDependenciesReadiness || propagation.areDependenciesReady(initializedVars)) {
-        boolean learnt = propagation.propagate(initializedVars);
-        if (learnt) {
-          workSet.addAll(propagation.dependents());
-        }
-      }
-    }
-  }
 }

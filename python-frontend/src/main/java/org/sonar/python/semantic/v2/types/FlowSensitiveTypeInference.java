@@ -4,18 +4,15 @@
  * mailto:info AT sonarsource DOT com
  *
  * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation; either
- * version 3 of the License, or (at your option) any later version.
+ * modify it under the terms of the Sonar Source-Available License Version 1, as published by SonarSource SA.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the Sonar Source-Available License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public License
- * along with this program; if not, write to the Free Software Foundation,
- * Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * You should have received a copy of the Sonar Source-Available License
+ * along with this program; if not, see https://sonarsource.com/license/ssal/
  */
 package org.sonar.python.semantic.v2.types;
 
@@ -48,10 +45,13 @@ public class FlowSensitiveTypeInference extends ForwardAnalysis {
   private final Map<Statement, Assignment> assignmentsByAssignmentStatement;
   private final Map<Statement, Set<Definition>> definitionsByDefinitionStatement;
   private final Map<String, PythonType> parameterTypesByName;
+
+  private final TypeTable typeTable;
   private final IsInstanceVisitor isInstanceVisitor;
 
+
   public FlowSensitiveTypeInference(
-    TypeTable projectLevelTypeTable, Set<SymbolV2> trackedVars,
+    TypeTable typeTable, Set<SymbolV2> trackedVars,
     Map<Statement, Assignment> assignmentsByAssignmentStatement,
     Map<Statement, Set<Definition>> definitionsByDefinitionStatement,
     Map<String, PythonType> parameterTypesByName
@@ -60,7 +60,9 @@ public class FlowSensitiveTypeInference extends ForwardAnalysis {
     this.assignmentsByAssignmentStatement = assignmentsByAssignmentStatement;
     this.definitionsByDefinitionStatement = definitionsByDefinitionStatement;
     this.parameterTypesByName = parameterTypesByName;
-    this.isInstanceVisitor = new IsInstanceVisitor(projectLevelTypeTable);
+
+    this.typeTable = typeTable;
+    this.isInstanceVisitor = new IsInstanceVisitor(typeTable);
   }
 
   @Override
@@ -132,8 +134,8 @@ public class FlowSensitiveTypeInference extends ForwardAnalysis {
     updateTree(name, state);
   }
 
-  private static void updateTree(Tree tree, TypeInferenceProgramState state) {
-    tree.accept(new ProgramStateTypeInferenceVisitor(state));
+  private void updateTree(Tree tree, TypeInferenceProgramState state) {
+    tree.accept(new ProgramStateTypeInferenceVisitor(state, typeTable));
   }
 
 
@@ -178,7 +180,7 @@ public class FlowSensitiveTypeInference extends ForwardAnalysis {
       .ifPresent(definitions -> definitions.forEach(d -> {
         SymbolV2 symbol = d.lhsSymbol();
         if (trackedVars.contains(symbol)) {
-          programState.setTypes(symbol, Set.of(d.lhsName.typeV2()));
+          programState.setTypes(symbol, Set.of(d.lhsName().typeV2()));
         }
       }));
   }

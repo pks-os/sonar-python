@@ -4,29 +4,26 @@
  * mailto:info AT sonarsource DOT com
  *
  * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation; either
- * version 3 of the License, or (at your option) any later version.
+ * modify it under the terms of the Sonar Source-Available License Version 1, as published by SonarSource SA.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the Sonar Source-Available License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public License
- * along with this program; if not, write to the Free Software Foundation,
- * Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * You should have received a copy of the Sonar Source-Available License
+ * along with this program; if not, see https://sonarsource.com/license/ssal/
  */
 package org.sonar.python.semantic.v2.types;
 
 import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Stream;
-import org.sonar.plugins.python.api.tree.BaseTreeVisitor;
 import org.sonar.plugins.python.api.tree.Expression;
 import org.sonar.plugins.python.api.tree.FunctionDef;
 import org.sonar.plugins.python.api.tree.Name;
 import org.sonar.plugins.python.api.tree.QualifiedExpression;
+import org.sonar.python.semantic.v2.TypeTable;
 import org.sonar.python.tree.NameImpl;
 import org.sonar.python.types.v2.PythonType;
 import org.sonar.python.types.v2.UnionType;
@@ -34,10 +31,11 @@ import org.sonar.python.types.v2.UnionType;
 /**
  * Used in FlowSensitiveTypeInference to update name types based on program state
  */
-public class ProgramStateTypeInferenceVisitor extends BaseTreeVisitor {
+public class ProgramStateTypeInferenceVisitor extends TrivialTypePropagationVisitor {
   private final TypeInferenceProgramState state;
 
-  public ProgramStateTypeInferenceVisitor(TypeInferenceProgramState state) {
+  public ProgramStateTypeInferenceVisitor(TypeInferenceProgramState state, TypeTable typeTable) {
+    super(typeTable);
     this.state = state;
   }
 
@@ -68,11 +66,7 @@ public class ProgramStateTypeInferenceVisitor extends BaseTreeVisitor {
     }
   }
 
-  private static PythonType or(PythonType t1, PythonType t2) {
-    return UnionType.or(t1, t2);
-  }
-
   private static PythonType union(Stream<PythonType> types) {
-    return types.reduce(ProgramStateTypeInferenceVisitor::or).orElse(PythonType.UNKNOWN);
+    return types.reduce(UnionType::or).orElse(PythonType.UNKNOWN);
   }
 }

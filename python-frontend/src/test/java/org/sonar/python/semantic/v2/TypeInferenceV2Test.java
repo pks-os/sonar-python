@@ -4,18 +4,15 @@
  * mailto:info AT sonarsource DOT com
  *
  * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation; either
- * version 3 of the License, or (at your option) any later version.
+ * modify it under the terms of the Sonar Source-Available License Version 1, as published by SonarSource SA.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the Sonar Source-Available License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public License
- * along with this program; if not, write to the Free Software Foundation,
- * Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * You should have received a copy of the Sonar Source-Available License
+ * along with this program; if not, see https://sonarsource.com/license/ssal/
  */
 package org.sonar.python.semantic.v2;
 
@@ -2606,24 +2603,45 @@ public class TypeInferenceV2Test {
   static Stream<Arguments> unary_expression_of_variables() {
     return Stream.of(
       Arguments.of("x = 1; -x", INT_TYPE),
+      Arguments.of("x = 1; -(-x)", INT_TYPE),
       Arguments.of("x = 1; +x", INT_TYPE),
       Arguments.of("x = True; -x", INT_TYPE),
       Arguments.of("x = True; +x", INT_TYPE),
       Arguments.of("x = True; ~x", INT_TYPE),
       Arguments.of("x = True; not x", BOOL_TYPE),
       Arguments.of("x = 1; not x", BOOL_TYPE),
+      Arguments.of("x = 1; y = -x; -y", INT_TYPE),
+      Arguments.of("x = 1; x = 1; y = -x; -y", INT_TYPE),
+      Arguments.of("x = 1; y = 1; y = -x; -y", INT_TYPE),
+
+      Arguments.of("""
+        if someCond:
+          x = 1
+        else:
+          x = True
+        y = x
+        -y
+        """, INT_TYPE),
 
       Arguments.of("x = 1; -(x + 1)", INT_TYPE)
     );
   }
 
-  @Disabled("SONARPY-2257 unary expressions of non-literals do not propagate their type")
   @ParameterizedTest
   @MethodSource("unary_expression_of_variables")
   void unary_expression_of_variables(String code, PythonType expectedType) {
-    assertThat(lastExpression(code)).extracting(expr -> expr.typeV2().unwrappedType()).isEqualTo(expectedType);
+    assertThat(lastExpression(code).typeV2()).isInstanceOf(ObjectType.class).extracting(PythonType::unwrappedType).isEqualTo(expectedType);
   }
 
+  @ParameterizedTest
+  @MethodSource("unary_expression_of_variables")
+  void unary_expression_of_variables_with_try_except(String code, PythonType expectedType) {
+    var codeWithTryCatch = """
+      try: pass
+      except: pass
+      """ + code;
+    assertThat(lastExpression(codeWithTryCatch)).extracting(expr -> expr.typeV2().unwrappedType()).isEqualTo(expectedType);
+  }
 
   @Test
   void imported_ambiguous_symbol() {

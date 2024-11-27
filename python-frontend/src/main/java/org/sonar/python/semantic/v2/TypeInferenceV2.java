@@ -4,18 +4,15 @@
  * mailto:info AT sonarsource DOT com
  *
  * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation; either
- * version 3 of the License, or (at your option) any later version.
+ * modify it under the terms of the Sonar Source-Available License Version 1, as published by SonarSource SA.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the Sonar Source-Available License for more details.
  *
- * You should have received a copy of the GNU Lesser General Public License
- * along with this program; if not, write to the Free Software Foundation,
- * Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * You should have received a copy of the Sonar Source-Available License
+ * along with this program; if not, see https://sonarsource.com/license/ssal/
  */
 package org.sonar.python.semantic.v2;
 
@@ -37,6 +34,7 @@ import org.sonar.plugins.python.api.tree.Parameter;
 import org.sonar.plugins.python.api.tree.StatementList;
 import org.sonar.plugins.python.api.tree.Tree;
 import org.sonar.python.semantic.SymbolUtils;
+import org.sonar.python.semantic.v2.types.AstBasedTypeInference;
 import org.sonar.python.semantic.v2.types.FlowSensitiveTypeInference;
 import org.sonar.python.semantic.v2.types.Propagation;
 import org.sonar.python.semantic.v2.types.PropagationVisitor;
@@ -125,7 +123,8 @@ public class TypeInferenceV2 {
     statements.accept(tryStatementVisitor);
     if (tryStatementVisitor.hasTryStatement()) {
       // CFG doesn't model precisely try-except statements. Hence we fallback to AST based type inference
-      return propagationVisitor.processPropagations(getTrackedVars(declaredVariables, assignedNames));
+      return new AstBasedTypeInference(propagationVisitor.propagationsByLhs(), projectLevelTypeTable)
+        .process(getTrackedVars(declaredVariables, assignedNames));
     }
 
     ControlFlowGraph cfg = controlFlowGraphSupplier.get();
