@@ -2961,6 +2961,26 @@ public class TypeInferenceV2Test {
   }
 
   @Test
+  void convertTypeshedModuleWithAliases() {
+    ProjectLevelSymbolTable empty = ProjectLevelSymbolTable.empty();
+    ProjectLevelTypeTable projectLevelTypeTable = new ProjectLevelTypeTable(empty);
+    LazyTypesContext lazyTypesContext = projectLevelTypeTable.lazyTypesContext();
+    SymbolsModuleTypeProvider symbolsModuleTypeProvider = new SymbolsModuleTypeProvider(empty, lazyTypesContext);
+    ModuleType builtinModule = symbolsModuleTypeProvider.createBuiltinModule();
+    PythonType responses = symbolsModuleTypeProvider.convertModuleType(List.of("fastapi", "responses"), builtinModule);
+    assertThat(responses.resolveMember("FileResponse")).containsInstanceOf(ClassType.class);
+    PythonType concurrency = symbolsModuleTypeProvider.convertModuleType(List.of("fastapi", "concurrency"), builtinModule);
+    assertThat(concurrency.resolveMember("iterate_in_threadpool")).containsInstanceOf(FunctionType.class);
+
+    List<Symbol> fileResponseSymbols = empty.stubFilesSymbols().stream().filter(s -> "fastapi.responses.FileResponse".equals(s.fullyQualifiedName())).toList();
+    assertThat(fileResponseSymbols).hasSize(1);
+    assertThat(fileResponseSymbols.get(0).kind()).isEqualTo(Symbol.Kind.CLASS);
+    List<Symbol> runInThreadPoolSymbols = empty.stubFilesSymbols().stream().filter(s -> "fastapi.concurrency.run_in_threadpool".equals(s.fullyQualifiedName())).toList();
+    assertThat(runInThreadPoolSymbols).hasSize(1);
+    assertThat(runInThreadPoolSymbols.get(0).kind()).isEqualTo(Symbol.Kind.FUNCTION);
+  }
+
+  @Test
   void imported_symbol_in_different_branch() {
     FileInput fileInput = inferTypes("""
       if x:
@@ -3075,6 +3095,59 @@ public class TypeInferenceV2Test {
     assertThat(yType.typeSource()).isSameAs(TypeSource.TYPE_HINT);
   }
 
+  public static Stream<Arguments> binaryExpressionsSource() {
+    return Stream.of(
+      Arguments.of("""
+        1 + 2
+        """, new ObjectType(INT_TYPE)),
+      Arguments.of("""
+        1 - 2
+        """, new ObjectType(INT_TYPE)),
+      Arguments.of("""
+        1 * 2
+        """, new ObjectType(INT_TYPE)),
+      Arguments.of("""
+        1 / 2
+        """, new ObjectType(INT_TYPE)),
+      Arguments.of("""
+        '1' + '2'
+        """, new ObjectType(STR_TYPE)),
+      Arguments.of("""
+        1 + '2'
+        """, PythonType.UNKNOWN),
+      Arguments.of("""
+        1 + 2.0
+        """, PythonType.UNKNOWN),
+      Arguments.of("""
+        a = 1
+        b = 2
+        a + b
+        """, new ObjectType(INT_TYPE)),
+      Arguments.of("""
+        a = 1
+        b = 2
+        c = a - b
+        c
+        """, new ObjectType(INT_TYPE)),
+      Arguments.of("""
+        try:
+          ...
+        except:
+          ...
+        a = 1
+        b = 2
+        c = a - b
+        c
+        """, new ObjectType(INT_TYPE))
+    );
+  }
+
+  @ParameterizedTest
+  @MethodSource("binaryExpressionsSource")
+  void binaryExpressionTest(String code, PythonType expectedType) {
+    assertThat(lastExpression(code).typeV2()).isEqualTo(expectedType);
+  }
+
   @Test
   void assignmentPlusTest() {
     var fileInput = inferTypes("""
@@ -3165,7 +3238,7 @@ public class TypeInferenceV2Test {
       .orElseGet(List::of);
 
     var fType = ((ExpressionStatement) statements.get(statements.size() - 1)).expressions().get(0).typeV2();
-    assertThat(fType).isSameAs(PythonType.UNKNOWN);
+    assertThat(fType).isInstanceOf(ObjectType.class).extracting(PythonType::unwrappedType).isSameAs(INT_TYPE);
   }
 
   @Test
