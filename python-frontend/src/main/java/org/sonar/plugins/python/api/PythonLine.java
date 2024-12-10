@@ -14,16 +14,7 @@
  * You should have received a copy of the Sonar Source-Available License
  * along with this program; if not, see https://sonarsource.com/license/ssal/
  */
-package org.sonar.python.semantic.v2.converter;
+package org.sonar.plugins.python.api;
 
-import org.sonar.python.index.AliasDescriptor;
-import org.sonar.python.index.Descriptor;
-import org.sonar.python.types.v2.PythonType;
-
-public class AliasDescriptorToPythonTypeConverter implements DescriptorToPythonTypeConverter {
-  @Override
-  public PythonType convert(ConversionContext ctx, Descriptor from) {
-    // SONARPY-2423: We should try to retrieve the original type if possible, instead of recreating it
-    return ctx.convert(((AliasDescriptor) from).originalDescriptor());
-  }
+public record PythonLine(int line) {
 }

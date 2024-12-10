@@ -18,6 +18,7 @@ package org.sonar.plugins.python.api.tree;
 
 import com.sonar.sslr.api.TokenType;
 import java.util.List;
+import org.sonar.plugins.python.api.PythonLine;
 
 public interface Token extends Tree {
 
@@ -31,7 +32,7 @@ public interface Token extends Tree {
 
   TokenType type();
 
-  int pythonLine();
+  PythonLine pythonLine();
 
   int pythonColumn();
 
