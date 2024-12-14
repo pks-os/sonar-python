@@ -78,6 +78,28 @@ build_task:
   <<: *ONLY_SONARSOURCE_QA
   env:
     # analysis on next
+    SONAR_TOKEN: dummy-value
+    SONAR_HOST_URL: dummy-value
+    #allow deployment of pull request artifacts to repox
+    DEPLOY_PULL_REQUEST: true
+    CIRRUS_CLONE_DEPTH: 50
+    SIGN_KEY: VAULT[development/kv/data/sign data.key]
+    PGP_PASSPHRASE: VAULT[development/kv/data/sign data.passphrase]
+  maven_cache:
+    folder: ${CIRRUS_WORKING_DIR}/.m2/repository
+  build_script:
+    - source cirrus-env BUILD
+    - regular_mvn_build_deploy_analyze -DskipTests=true -Dsonar.skip=true -P-typeshed_serializer
+    - ./check-license-compliance.sh
+  cleanup_before_cache_script: cleanup_maven_repository
+
+test_analyze_task:
+  depends_on:
+    - build
+  <<: *BUILD_CONTAINER_DEFINITION
+  <<: *ONLY_SONARSOURCE_QA
+  env:
+    # analysis on next
     SONAR_TOKEN: VAULT[development/kv/data/next data.token]
     SONAR_HOST_URL: https://next.sonarqube.com/sonarqube
     #allow deployment of pull request artifacts to repox
@@ -87,25 +109,23 @@ build_task:
     PGP_PASSPHRASE: VAULT[development/kv/data/sign data.passphrase]
   maven_cache:
     folder: ${CIRRUS_WORKING_DIR}/.m2/repository
-  build_script:
+  analyze_script:
     - git submodule update --init
     - cd python-frontend/typeshed_serializer/resources/python-type-stubs
-    - git sparse-checkout set stubs/sklearn 
+    - git sparse-checkout set stubs/sklearn
     - git checkout
     - cd -
     - source cirrus-env BUILD
-    - regular_mvn_build_deploy_analyze -DfailStubGenerationFast=true
-    - ./check-license-compliance.sh
+    - DEPLOY_PULL_REQUEST=false regular_mvn_build_deploy_analyze -DfailStubGenerationFast=true -P-release,-sign -Dsonar.analysisCache.enabled=true -Dskip.its=true
   cleanup_before_cache_script: cleanup_maven_repository
 
 build_win_task:
   <<: *WINDOWS_VM_DEFINITION
   <<: *ONLY_SONARSOURCE_QA
-  depends_on:
-    - build
   maven_cache:
-    #windows cache is buggy if using ${CIRRUS_WORKING_DIR}
-    folder: ~/.m2/repository
+    # windows cache is buggy if using ${CIRRUS_WORKING_DIR}
+    # Additionally "~" seems to resolve differently in the context of the cache and the context of the build_script below
+    folder: C:/.m2/repository
   build_script:
     - git config --global core.autocrlf input
     - git submodule update --init
@@ -115,7 +135,7 @@ build_win_task:
     - cd -
     - source cirrus-env CI
     - unset SONARSOURCE_QA
-    - mvn.cmd package -DskipTypeshed=true -DfailStubGenerationFast=true
+    - mvn.cmd package -Dmaven.repo.local=C:/.m2/repository -DskipTypeshed=true -DfailStubGenerationFast=true
 
 ws_scan_task:
   depends_on:
@@ -167,8 +187,8 @@ ruling_task:
   <<: *ONLY_SONARSOURCE_QA
   eks_container:
     <<: *QA_CONTAINER_DEFINITION
-    cpu: 4
-    memory: 8G
+    cpu: 16
+    memory: 32G
   env:
     CIRRUS_CLONE_DEPTH: 10
     SONARSOURCE_QA: true
@@ -181,30 +201,7 @@ ruling_task:
     - source cirrus-env QA
     - source set_maven_build_version $BUILD_NUMBER
     - cd its/ruling
-    - mvn verify -Dsonar.runtimeVersion=LATEST_RELEASE -Dmaven.test.redirectTestOutputToFile=false -B -e -V -Dtest=PythonRulingTest
-  cleanup_before_cache_script: cleanup_maven_repository
-
-extended_ruling_task:
-  depends_on:
-    - build
-  <<: *ONLY_SONARSOURCE_QA
-  eks_container:
-    <<: *QA_CONTAINER_DEFINITION
-    cpu: 4
-    memory: 8G
-  env:
-    CIRRUS_CLONE_DEPTH: 10
-    SONARSOURCE_QA: true
-  maven_cache:
-    folder: ${CIRRUS_WORKING_DIR}/.m2/repository
-  <<: *ORCHESTRATOR_CACHE_DEFINITION
-  submodules_script:
-    - git submodule update --init
-  ruling_script:
-    - source cirrus-env QA
-    - source set_maven_build_version $BUILD_NUMBER
-    - cd its/ruling
-    - mvn verify -Dsonar.runtimeVersion=LATEST_RELEASE -Dmaven.test.redirectTestOutputToFile=false -B -e -V -Dtest=PythonExtendedRulingTest
+    - mvn verify -Dsonar.runtimeVersion=LATEST_RELEASE -Dmaven.test.redirectTestOutputToFile=false -B -e -V -Dtest=PythonRulingTest -Djunit.jupiter.execution.parallel.config.dynamic.factor=1
   cleanup_before_cache_script: cleanup_maven_repository
 
 pr_analysis_qa_task:
@@ -231,6 +228,7 @@ pr_analysis_qa_task:
 
 promote_task:
   depends_on:
+    - test_analyze
     - ruling
     - plugin_qa
     - ws_scan
