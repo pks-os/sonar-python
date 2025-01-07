@@ -5,12 +5,12 @@
   <parent>
     <groupId>org.sonarsource.parent</groupId>
     <artifactId>parent</artifactId>
-    <version>82.0.0.2314</version>
+    <version>83.0.0.2369</version>
   </parent>
 
   <groupId>org.sonarsource.python</groupId>
   <artifactId>python</artifactId>
-  <version>4.26-SNAPSHOT</version>
+  <version>4.27-SNAPSHOT</version>
   <packaging>pom</packaging>
 
   <name>Python</name>
