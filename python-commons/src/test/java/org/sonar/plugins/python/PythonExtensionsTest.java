@@ -34,7 +34,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-class PythonPluginTest {
+class PythonExtensionsTest {
 
   @RegisterExtension
   public LogTesterJUnit5 logTester = new LogTesterJUnit5().setLevel(Level.DEBUG);
@@ -52,9 +52,9 @@ class PythonPluginTest {
 
   @Test
   void classNotAvailable() {
-    PythonPlugin.SonarLintPluginAPIVersion sonarLintPluginAPIVersion = mock(PythonPlugin.SonarLintPluginAPIVersion.class);
+    PythonExtensions.SonarLintPluginAPIVersion sonarLintPluginAPIVersion = mock(PythonExtensions.SonarLintPluginAPIVersion.class);
     when(sonarLintPluginAPIVersion.isDependencyAvailable()).thenReturn(false);
-    PythonPlugin.SonarLintPluginAPIManager sonarLintPluginAPIManager = new PythonPlugin.SonarLintPluginAPIManager();
+    PythonExtensions.SonarLintPluginAPIManager sonarLintPluginAPIManager = new PythonExtensions.SonarLintPluginAPIManager();
     Plugin.Context context = mock(Plugin.Context.class);
     sonarLintPluginAPIManager.addSonarlintPythonIndexer(context, sonarLintPluginAPIVersion);
     assertThat(logTester.logs(Level.DEBUG)).containsExactly("Error while trying to inject SonarLintPythonIndexer");
@@ -62,7 +62,7 @@ class PythonPluginTest {
 
   private static List extensions(SonarRuntime runtime) {
     Plugin.Context context = new Plugin.Context(runtime);
-    new PythonPlugin().define(context);
+    PythonExtensions.addCommonExtensions(context);
     return context.getExtensions();
   }
 
